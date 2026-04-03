@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "workdrive-sync"
+version = "0.1.0"
+description = "Lightweight two-way sync client for Zoho WorkDrive on Linux"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31",
+    "watchdog>=4.0",
+    "PyGObject>=3.42",
+]
+
+[project.scripts]
+workdrive-sync = "workdrive_sync.main:main"
