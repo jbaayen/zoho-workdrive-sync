@@ -9,11 +9,33 @@ description = "Lightweight two-way sync client for Zoho WorkDrive on Linux"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
+authors = [
+    { name = "Jorn Baayen" },
+]
+keywords = ["zoho", "workdrive", "sync", "linux", "gnome"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: GTK",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Desktop Environment :: Gnome",
+    "Topic :: System :: Filesystems",
+]
 dependencies = [
     "requests>=2.31",
     "watchdog>=4.0",
     "PyGObject>=3.42",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jbaayen/workdrive-sync"
+Repository = "https://github.com/jbaayen/workdrive-sync"
+Issues = "https://github.com/jbaayen/workdrive-sync/issues"
 
 [project.scripts]
 workdrive-sync = "workdrive_sync.main:main"
