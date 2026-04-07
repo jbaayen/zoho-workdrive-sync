@@ -11,7 +11,7 @@ from .sync import ConflictType, Resolution, SyncItem
 
 logger = logging.getLogger(__name__)
 
-RESOLUTION_OPTIONS = [Resolution.KEEP_LOCAL, Resolution.KEEP_REMOTE, Resolution.KEEP_BOTH, Resolution.SKIP]
+RESOLUTION_OPTIONS = [Resolution.KEEP_LOCAL, Resolution.KEEP_REMOTE, Resolution.KEEP_BOTH, Resolution.MARK_SYNCED, Resolution.SKIP]
 
 
 class ConflictDialog(Gtk.Dialog):
@@ -43,9 +43,10 @@ class ConflictDialog(Gtk.Dialog):
         box.pack_start(scroll, True, True, 0)
 
         # List store: file, conflict type, resolution index
+        skip_idx = RESOLUTION_OPTIONS.index(Resolution.SKIP)
         self.store = Gtk.ListStore(str, str, int, int)  # file, conflict, res_idx, conflict_list_idx
         for i, c in enumerate(conflicts):
-            self.store.append([c.rel_path, c.conflict_type.value if c.conflict_type else "", 3, i])  # 3 = SKIP
+            self.store.append([c.rel_path, c.conflict_type.value if c.conflict_type else "", skip_idx, i])
 
         tree = Gtk.TreeView(model=self.store)
         tree.set_headers_visible(True)
@@ -87,7 +88,7 @@ class ConflictDialog(Gtk.Dialog):
         box.pack_start(btn_box, False, False, 0)
 
         for label, res in [("All Local", Resolution.KEEP_LOCAL), ("All Remote", Resolution.KEEP_REMOTE),
-                           ("All Both", Resolution.KEEP_BOTH)]:
+                           ("All Both", Resolution.KEEP_BOTH), ("All Mark Synced", Resolution.MARK_SYNCED)]:
             btn = Gtk.Button(label=label)
             btn.connect("clicked", self._on_bulk, res)
             btn_box.pack_start(btn, False, False, 0)

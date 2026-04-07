@@ -60,7 +60,14 @@ def first_run_setup() -> Config:
         print("\nAvailable teams:")
         for i, t in enumerate(teams):
             print(f"  {i + 1}. {t.get('attributes', {}).get('name', t['id'])}")
-        choice = int(input("Select team number: ").strip()) - 1
+        try:
+            choice = int(input("Select team number: ").strip()) - 1
+        except ValueError:
+            print("Error: Please enter a number.")
+            sys.exit(1)
+        if choice < 0 or choice >= len(teams):
+            print(f"Error: Please enter a number between 1 and {len(teams)}.")
+            sys.exit(1)
         team = teams[choice]
 
     team_id = team["id"]
@@ -80,7 +87,14 @@ def first_run_setup() -> Config:
         print("\nAvailable workspaces:")
         for i, w in enumerate(workspaces):
             print(f"  {i + 1}. {w.get('attributes', {}).get('name', w['id'])}")
-        choice = int(input("Select workspace number: ").strip()) - 1
+        try:
+            choice = int(input("Select workspace number: ").strip()) - 1
+        except ValueError:
+            print("Error: Please enter a number.")
+            sys.exit(1)
+        if choice < 0 or choice >= len(workspaces):
+            print(f"Error: Please enter a number between 1 and {len(workspaces)}.")
+            sys.exit(1)
         ws = workspaces[choice]
 
     # Browse folders within the workspace
@@ -96,7 +110,14 @@ def first_run_setup() -> Config:
         print(f"  0. . (workspace root)")
         for i, f in enumerate(folders):
             print(f"  {i + 1}. {f.get('attributes', {}).get('name', f['id'])}")
-        choice = int(input("Select folder to sync (0 for root): ").strip())
+        try:
+            choice = int(input("Select folder to sync (0 for root): ").strip())
+        except ValueError:
+            print("Error: Please enter a number.")
+            sys.exit(1)
+        if choice < 0 or choice > len(folders):
+            print(f"Error: Please enter a number between 0 and {len(folders)}.")
+            sys.exit(1)
         remote_folder = ws if choice == 0 else folders[choice - 1]
 
     local_folder = input("\nLocal folder path: ").strip()

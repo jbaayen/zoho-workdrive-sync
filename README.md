@@ -95,6 +95,7 @@ When both sides have changed, a GTK dialog shows all conflicts in a table. Per f
 | **Keep Local**  | Upload yours, overwrite remote                                                                 |
 | **Keep Remote** | Download theirs, overwrite local                                                               |
 | **Keep Both**   | Rename local to `filename (conflict).ext`, download remote version as the original name        |
+| **Mark Synced** | Accept current state as baseline without transferring files (useful for pre-synced folders)     |
 | **Skip**        | Do nothing this cycle                                                                          |
 
 Bulk buttons ("All Local", "All Remote", "All Both") resolve everything at once.

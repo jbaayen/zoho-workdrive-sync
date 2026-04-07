@@ -1,6 +1,7 @@
 """Zoho WorkDrive REST API wrapper."""
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,13 +29,24 @@ class WorkDriveAPI:
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         headers = kwargs.pop("headers", {})
         headers.update(self._headers())
-        resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
 
-        # Retry once on 401 (token expired mid-request)
-        if resp.status_code == 401:
-            self.auth._access_token = None
-            headers.update(self._headers())
+        for attempt in range(5):
             resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
+
+            # Retry once on 401 (token expired mid-request)
+            if resp.status_code == 401 and attempt == 0:
+                self.auth._access_token = None
+                headers.update(self._headers())
+                continue
+
+            # Retry on 429 with exponential backoff
+            if resp.status_code == 429:
+                wait = min(2 ** attempt * 5, 120)
+                logger.warning("Rate limited, retrying in %ds...", wait)
+                time.sleep(wait)
+                continue
+
+            break
 
         if not resp.ok:
             logger.error("API %s %s → %s: %s", method, url, resp.status_code, resp.text)

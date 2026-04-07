@@ -34,6 +34,7 @@ class Resolution(Enum):
     KEEP_LOCAL = "Keep local"
     KEEP_REMOTE = "Keep remote"
     KEEP_BOTH = "Keep both"
+    MARK_SYNCED = "Mark synced"
     SKIP = "Skip"
 
 
@@ -274,5 +275,18 @@ class SyncEngine:
             if item.remote_id:
                 item.action = Action.DOWNLOAD
                 self._execute_one(item)
+
+        elif item.resolution == Resolution.MARK_SYNCED:
+            # Accept current state as baseline without transferring files
+            local = self.local_root / item.rel_path
+            logger.info(f"Marking as synced: {item.rel_path}")
+            self.db.upsert(FileRecord(
+                rel_path=item.rel_path,
+                local_mtime=local.stat().st_mtime if local.exists() else 0,
+                local_hash=file_hash(local) if local.exists() else "",
+                remote_etag=item.remote_etag,
+                remote_modified=item.remote_modified,
+                remote_id=item.remote_id,
+            ))
 
         # Resolution.SKIP -> do nothing
