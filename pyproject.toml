@@ -33,9 +33,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jbaayen/workdrive-sync"
-Repository = "https://github.com/jbaayen/workdrive-sync"
-Issues = "https://github.com/jbaayen/workdrive-sync/issues"
+Homepage = "https://github.com/jbaayen/zoho-workdrive-sync"
+Repository = "https://github.com/jbaayen/zoho-workdrive-sync"
+Issues = "https://github.com/jbaayen/zoho-workdrive-sync/issues"
 
 [project.scripts]
-workdrive-sync = "workdrive_sync.main:main"
+zoho-workdrive-sync = "workdrive_sync.main:main"

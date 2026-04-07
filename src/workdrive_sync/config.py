@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 CONFIG_DIR = Path(os.environ.get(
     "XDG_CONFIG_HOME", Path.home() / ".config"
-)) / "workdrive-sync"
+)) / "zoho-workdrive-sync"
 
 CONFIG_FILE = CONFIG_DIR / "config.json"
 TOKEN_FILE = CONFIG_DIR / "token.json"
