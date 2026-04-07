@@ -17,8 +17,12 @@ API_BASE = "https://workdrive.zoho.eu/api/v1"
 class WorkDriveAPI:
     """Thin wrapper around the Zoho WorkDrive v1 API."""
 
+    # Minimum delay between API calls to avoid rate limiting
+    REQUEST_INTERVAL = 0.5  # seconds
+
     def __init__(self, auth: ZohoAuth):
         self.auth = auth
+        self._last_request_time = 0.0
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -30,7 +34,13 @@ class WorkDriveAPI:
         headers = kwargs.pop("headers", {})
         headers.update(self._headers())
 
+        # Throttle requests to stay under rate limit
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self.REQUEST_INTERVAL:
+            time.sleep(self.REQUEST_INTERVAL - elapsed)
+
         for attempt in range(5):
+            self._last_request_time = time.time()
             resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
 
             # Retry once on 401 (token expired mid-request)
@@ -41,7 +51,7 @@ class WorkDriveAPI:
 
             # Retry on 429 with exponential backoff
             if resp.status_code == 429:
-                wait = min(2 ** attempt * 5, 120)
+                wait = min(2 ** attempt * 10, 120)
                 logger.warning("Rate limited, retrying in %ds...", wait)
                 time.sleep(wait)
                 continue
