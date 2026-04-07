@@ -13,24 +13,36 @@ Lightweight two-way sync client for [Zoho WorkDrive](https://www.zoho.com/workdr
 
 ## Install
 
-```bash
-pip install .
-```
-
 ### System dependencies
 
 On Debian/Ubuntu:
 
 ```bash
-sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-appindicator3-0.1
+sudo apt install libgirepository-2.0-dev python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
+```
+
+### Install into a virtual environment
+
+```bash
+uv venv .venv
+source .venv/bin/activate
+uv pip install .
+```
+
+Or without `uv`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install .
 ```
 
 ## Setup
 
 1. Create a Self Client at [api-console.zoho.eu](https://api-console.zoho.eu/)
 2. Run `workdrive-sync` -- it will walk you through first-time setup:
-   - Enter your client_id and client_secret
-   - Generate a grant code with scope `WorkDrive.workspace.READ,WorkDrive.files.ALL`
+   - Enter your client\_id and client\_secret
+   - Generate a grant code with scope `WorkDrive.team.READ,WorkDrive.workspace.READ,WorkDrive.teamfolders.READ,WorkDrive.files.ALL`
    - Select your WorkDrive team and folder
    - Choose a local folder to sync
 
@@ -45,6 +57,47 @@ The app starts in the system tray. Right-click for options:
 - **Open Sync Folder** -- open the local folder in your file manager
 - **Open WorkDrive** -- open Zoho WorkDrive in the browser
 - **Quit**
+
+## Sync Logic
+
+Two-way delta sync using a SQLite state database that tracks each file's local SHA-256 hash, mtime, remote etag, and remote modification time.
+
+### Triggers
+
+- **Periodic**: every 300 seconds (configurable via `interval_seconds` in config)
+- **Filesystem watcher**: detects local changes via watchdog (debounced 5 seconds)
+- **Manual**: "Sync Now" from the tray menu
+
+### Change detection
+
+- **Local**: if the file's mtime changed, recompute the SHA-256 hash. Only mark as changed if the hash differs (avoids false positives from timestamp-only changes).
+- **Remote**: mark as changed if the etag or modification time differs from the stored values.
+
+### Action matrix
+
+| Local              | Remote  | Action           |
+|--------------------|---------|------------------|
+| Added              | —       | Upload           |
+| Changed            | —       | Upload           |
+| Deleted            | —       | Delete remote    |
+| —                  | Added   | Download         |
+| —                  | Changed | Download         |
+| —                  | Deleted | Delete local     |
+| Deleted            | Deleted | Clean up state   |
+| Both changed/added | —       | Conflict         |
+
+## Conflict Resolution
+
+When both sides have changed, a GTK dialog shows all conflicts in a table. Per file you choose:
+
+| Resolution      | Effect                                                                                         |
+|-----------------|------------------------------------------------------------------------------------------------|
+| **Keep Local**  | Upload yours, overwrite remote                                                                 |
+| **Keep Remote** | Download theirs, overwrite local                                                               |
+| **Keep Both**   | Rename local to `filename (conflict).ext`, download remote version as the original name        |
+| **Skip**        | Do nothing this cycle                                                                          |
+
+Bulk buttons ("All Local", "All Remote", "All Both") resolve everything at once.
 
 ## Architecture
 

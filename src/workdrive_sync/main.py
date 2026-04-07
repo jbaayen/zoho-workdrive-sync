@@ -28,6 +28,9 @@ def setup_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Quiet noisy loggers
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("watchdog").setLevel(logging.WARNING)
 
 
 def first_run_setup() -> Config:
@@ -62,20 +65,39 @@ def first_run_setup() -> Config:
 
     team_id = team["id"]
 
-    # Browse WorkDrive folders
-    print("\nBrowsing WorkDrive root folders...")
-    root_items = api.list_folder(team_id)
+    # Browse WorkDrive workspaces
+    print("\nBrowsing WorkDrive workspaces...")
+    workspaces = api.list_workspaces(team_id)
+
+    if not workspaces:
+        print("Error: No workspaces found in WorkDrive.")
+        sys.exit(1)
+
+    if len(workspaces) == 1:
+        ws = workspaces[0]
+        print(f"Using workspace: {ws.get('attributes', {}).get('name', ws['id'])}")
+    else:
+        print("\nAvailable workspaces:")
+        for i, w in enumerate(workspaces):
+            print(f"  {i + 1}. {w.get('attributes', {}).get('name', w['id'])}")
+        choice = int(input("Select workspace number: ").strip()) - 1
+        ws = workspaces[choice]
+
+    # Browse folders within the workspace
+    print("\nBrowsing folders...")
+    root_items = api.list_folder(ws["id"])
     folders = [f for f in root_items if f.get("attributes", {}).get("is_folder")]
 
     if not folders:
-        print("Error: No folders found in WorkDrive.")
-        sys.exit(1)
-
-    print("\nAvailable folders:")
-    for i, f in enumerate(folders):
-        print(f"  {i + 1}. {f.get('attributes', {}).get('name', f['id'])}")
-    choice = int(input("Select folder to sync: ").strip()) - 1
-    remote_folder = folders[choice]
+        # No subfolders — sync the workspace root directly
+        remote_folder = ws
+    else:
+        print("\nAvailable folders:")
+        print(f"  0. . (workspace root)")
+        for i, f in enumerate(folders):
+            print(f"  {i + 1}. {f.get('attributes', {}).get('name', f['id'])}")
+        choice = int(input("Select folder to sync (0 for root): ").strip())
+        remote_folder = ws if choice == 0 else folders[choice - 1]
 
     local_folder = input("\nLocal folder path: ").strip()
     local_folder = str(Path(local_folder).expanduser().resolve())

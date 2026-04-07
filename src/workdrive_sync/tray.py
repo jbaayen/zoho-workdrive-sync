@@ -9,12 +9,16 @@ from typing import Callable, Optional
 
 import gi
 gi.require_version("Gtk", "3.0")
-try:
-    gi.require_version("AppIndicator3", "0.1")
-    from gi.repository import AppIndicator3
-    HAS_APPINDICATOR = True
-except (ValueError, ImportError):
-    HAS_APPINDICATOR = False
+HAS_APPINDICATOR = False
+AppIndicator3 = None
+for _ns in ("AyatanaAppIndicator3", "AppIndicator3"):
+    try:
+        gi.require_version(_ns, "0.1")
+        AppIndicator3 = getattr(__import__("gi.repository", fromlist=[_ns]), _ns)
+        HAS_APPINDICATOR = True
+        break
+    except (ValueError, ImportError):
+        continue
 
 from gi.repository import Gtk, GLib
 
@@ -28,15 +32,8 @@ class TrayState(Enum):
     ERROR = auto()
 
 
-# Icon names from the system icon theme
-ICON_MAP = {
-    TrayState.IDLE: "folder-sync",        # fallback: folder
-    TrayState.SYNCING: "emblem-synchronizing",  # fallback: view-refresh
-    TrayState.CONFLICT: "dialog-warning",
-    TrayState.ERROR: "dialog-error",
-}
-
-FALLBACK_ICONS = {
+# Standard freedesktop icon names
+ICON_NAMES = {
     TrayState.IDLE: "folder",
     TrayState.SYNCING: "view-refresh",
     TrayState.CONFLICT: "dialog-warning",
@@ -81,11 +78,7 @@ class SyncTray:
             self.status_icon.set_visible(True)
 
     def _icon_name(self, state: TrayState) -> str:
-        name = ICON_MAP[state]
-        theme = Gtk.IconTheme.get_default()
-        if theme.has_icon(name):
-            return name
-        return FALLBACK_ICONS.get(state, "dialog-information")
+        return ICON_NAMES[state]
 
     def _build_menu(self) -> None:
         self.menu = Gtk.Menu()
@@ -129,10 +122,14 @@ class SyncTray:
 
     def _update_ui(self) -> None:
         icon = self._icon_name(self._state)
+        logger.debug("Tray update: state=%s icon=%s text=%s", self._state, icon, self._status_text)
         self._status_item.set_label(f"Status: {self._status_text}")
 
         if HAS_APPINDICATOR:
-            self.indicator.set_icon(icon)
+            self.indicator.set_icon_full(icon, self._status_text)
+            # Force GNOME shell to refresh the icon
+            self.indicator.set_status(AppIndicator3.IndicatorStatus.PASSIVE)
+            self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         else:
             self.status_icon.set_from_icon_name(icon)
             self.status_icon.set_tooltip_text(f"WorkDrive Sync - {self._status_text}")

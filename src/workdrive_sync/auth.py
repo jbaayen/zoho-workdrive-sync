@@ -11,7 +11,7 @@ from .config import save_refresh_token, load_refresh_token
 logger = logging.getLogger(__name__)
 
 TOKEN_URL = "https://accounts.zoho.eu/oauth/v2/token"
-SCOPES = "WorkDrive.workspace.READ,WorkDrive.files.ALL"
+SCOPES = "WorkDrive.team.READ,WorkDrive.workspace.READ,WorkDrive.teamfolders.READ,WorkDrive.files.ALL"
 
 
 class ZohoAuth:

@@ -20,7 +20,10 @@ class WorkDriveAPI:
         self.auth = auth
 
     def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Zoho-oauthtoken {self.auth.get_access_token()}"}
+        return {
+            "Authorization": f"Zoho-oauthtoken {self.auth.get_access_token()}",
+            "Accept": "application/vnd.api+json",
+        }
 
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         headers = kwargs.pop("headers", {})
@@ -33,6 +36,8 @@ class WorkDriveAPI:
             headers.update(self._headers())
             resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
 
+        if not resp.ok:
+            logger.error("API %s %s → %s: %s", method, url, resp.status_code, resp.text)
         resp.raise_for_status()
         return resp
 
@@ -45,7 +50,16 @@ class WorkDriveAPI:
 
     def list_teams(self) -> List[Dict[str, Any]]:
         """List WorkDrive teams the user belongs to."""
-        data = self._json("GET", f"{API_BASE}/users/me/teams")
+        user_data = self._json("GET", f"{API_BASE}/users/me")
+        user_id = user_data["data"]["id"]
+        data = self._json("GET", f"{API_BASE}/users/{user_id}/teams")
+        logger.debug("list_teams response: %s", data)
+        return data.get("data", [])
+
+    def list_workspaces(self, team_id: str) -> List[Dict[str, Any]]:
+        """List workspaces (top-level folders) in a team."""
+        data = self._json("GET", f"{API_BASE}/teams/{team_id}/teamfolders")
+        logger.debug("list_workspaces response: %s", data)
         return data.get("data", [])
 
     # ------------------------------------------------------------------
@@ -87,22 +101,24 @@ class WorkDriveAPI:
         """Upload a new file to a folder."""
         name = filename or local_path.name
         with open(local_path, "rb") as f:
-            data = self._json("POST", f"{API_BASE}/upload", files={
-                "content": (name, f),
-            }, data={
+            data = self._json("POST", f"{API_BASE}/upload", params={
+                "filename": name,
                 "parent_id": parent_id,
                 "override-name-exist": "false",
+            }, files={
+                "content": (name, f, "application/octet-stream"),
             })
         return data.get("data", [{}])[0] if data.get("data") else data
 
     def update_file(self, file_id: str, local_path: Path) -> Dict[str, Any]:
         """Upload a new version of an existing file."""
         with open(local_path, "rb") as f:
-            data = self._json("POST", f"{API_BASE}/upload", files={
-                "content": (local_path.name, f),
-            }, data={
+            data = self._json("POST", f"{API_BASE}/upload", params={
+                "filename": local_path.name,
                 "resource_id": file_id,
                 "override-name-exist": "true",
+            }, files={
+                "content": (local_path.name, f, "application/octet-stream"),
             })
         return data.get("data", [{}])[0] if data.get("data") else data
 

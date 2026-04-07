@@ -30,7 +30,7 @@ class StateDB:
     def __init__(self, path: Optional[Path] = None):
         ensure_config_dir()
         self.path = path or STATE_DB
-        self.conn = sqlite3.connect(str(self.path))
+        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._migrate()
 

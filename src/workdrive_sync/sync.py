@@ -188,14 +188,19 @@ class SyncEngine:
                 result = self.api.update_file(item.remote_id, local)
             else:
                 result = self.api.upload_file(parent_id, local)
-            attrs = result.get("attributes", {})
+            # Upload response lacks etag/modified_time; fetch full metadata
+            file_id = (result.get("id")
+                       or result.get("attributes", {}).get("resource_id")
+                       or item.remote_id)
+            meta = self.api.get_file_meta(file_id)
+            attrs = meta.get("attributes", {})
             self.db.upsert(FileRecord(
                 rel_path=rel,
                 local_mtime=local.stat().st_mtime,
                 local_hash=file_hash(local),
-                remote_etag=attrs.get("resource_etag", item.remote_etag),
-                remote_modified=attrs.get("modified_time", item.remote_modified),
-                remote_id=result.get("id", item.remote_id),
+                remote_etag=attrs.get("resource_etag", ""),
+                remote_modified=attrs.get("modified_time", ""),
+                remote_id=meta.get("id", file_id),
             ))
 
         elif item.action == Action.DOWNLOAD:
