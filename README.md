@@ -1,4 +1,4 @@
-# workdrive-sync
+# zoho-workdrive-sync
 
 Lightweight two-way sync client for [Zoho WorkDrive](https://www.zoho.com/workdrive/) on Linux. Runs in the GNOME system tray, syncs one local folder to one WorkDrive folder, and presents conflicts in a batched resolution dialog.
 
@@ -21,7 +21,15 @@ On Debian/Ubuntu:
 sudo apt install libgirepository-2.0-dev python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
 ```
 
-### Install into a virtual environment
+### Install and autostart
+
+```bash
+./setup.sh
+```
+
+This installs the `zoho-workdrive-sync` command into `~/.local/bin` via `uv tool install` and adds a `.desktop` file to `~/.config/autostart/` so it starts automatically on login.
+
+### Install into a virtual environment (alternative)
 
 ```bash
 uv venv .venv
@@ -29,18 +37,10 @@ source .venv/bin/activate
 uv pip install .
 ```
 
-Or without `uv`:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install .
-```
-
 ## Setup
 
 1. Create a Self Client at [api-console.zoho.eu](https://api-console.zoho.eu/)
-2. Run `workdrive-sync` -- it will walk you through first-time setup:
+2. Run `zoho-workdrive-sync` -- it will walk you through first-time setup:
    - Enter your client\_id and client\_secret
    - Generate a grant code with scope `WorkDrive.team.READ,WorkDrive.workspace.READ,WorkDrive.teamfolders.READ,WorkDrive.files.ALL`
    - Select your WorkDrive team and folder
@@ -49,7 +49,7 @@ pip install .
 ## Usage
 
 ```bash
-workdrive-sync
+zoho-workdrive-sync
 ```
 
 The app starts in the system tray. Right-click for options:
