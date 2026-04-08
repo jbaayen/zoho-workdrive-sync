@@ -153,6 +153,7 @@ class App:
             on_sync_now=self._trigger_sync,
             on_open_conflicts=self._show_conflicts,
             on_quit=self._quit,
+            on_dismiss_error=self._dismiss_error,
             local_folder=cfg.local_folder,
         )
 
@@ -218,13 +219,13 @@ class App:
                 # Show conflict dialog on GTK thread
                 GLib.idle_add(self._show_conflicts)
             elif errors:
-                self.tray.set_state(TrayState.ERROR, f"{errors} error(s)")
+                self.tray.set_state(TrayState.ERROR, self._format_errors(errors))
             else:
                 self.tray.set_state(TrayState.IDLE, "Synced")
 
         except Exception as e:
             logger.exception("Sync failed")
-            self.tray.set_state(TrayState.ERROR, str(e)[:50])
+            self.tray.set_state(TrayState.ERROR, str(e))
 
     def _show_conflicts(self) -> None:
         if not self._pending_conflicts:
@@ -238,9 +239,19 @@ class App:
         self.tray.set_state(TrayState.SYNCING, "Resolving conflicts...")
         errors = self.engine.execute(items)
         if errors:
-            self.tray.set_state(TrayState.ERROR, f"{errors} error(s)")
+            self.tray.set_state(TrayState.ERROR, self._format_errors(errors))
         else:
             self.tray.set_state(TrayState.IDLE, "Synced")
+
+    @staticmethod
+    def _format_errors(errors: list[str]) -> str:
+        msg = errors[0]
+        if len(errors) > 1:
+            msg += f" (+{len(errors) - 1} more)"
+        return msg
+
+    def _dismiss_error(self) -> None:
+        self.tray.set_state(TrayState.IDLE, "Idle")
 
     def _quit(self) -> None:
         self._stop.set()

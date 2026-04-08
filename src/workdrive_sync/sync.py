@@ -78,14 +78,10 @@ class SyncEngine:
 
         # Scan remote
         remote_files: Dict[str, Dict] = {}  # rel_path -> item dict
-        try:
-            for item in self.api.walk_remote(self.remote_folder_id):
-                rel = item.get("rel_path", "")
-                if rel:
-                    remote_files[rel] = item
-        except Exception as e:
-            logger.error(f"Failed to scan remote: {e}")
-            return [], []
+        for item in self.api.walk_remote(self.remote_folder_id):
+            rel = item.get("rel_path", "")
+            if rel:
+                remote_files[rel] = item
 
         # Collect all known paths
         all_paths = set(known.keys()) | set(local_files.keys()) | set(remote_files.keys())
@@ -167,15 +163,16 @@ class SyncEngine:
 
         return actions, conflicts
 
-    def execute(self, items: List[SyncItem]) -> int:
-        """Execute a list of sync actions. Returns number of errors."""
-        errors = 0
+    def execute(self, items: List[SyncItem]) -> List[str]:
+        """Execute a list of sync actions. Returns list of error messages."""
+        errors: List[str] = []
         for item in items:
             try:
                 self._execute_one(item)
             except Exception as e:
-                logger.error(f"Sync failed for {item.rel_path}: {e}")
-                errors += 1
+                msg = f"{item.rel_path}: {e}"
+                logger.error(f"Sync failed for {msg}")
+                errors.append(msg)
         return errors
 
     def _execute_one(self, item: SyncItem) -> None:

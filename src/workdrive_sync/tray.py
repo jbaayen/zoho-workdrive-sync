@@ -49,12 +49,14 @@ class SyncTray:
         on_sync_now: Callable,
         on_open_conflicts: Callable,
         on_quit: Callable,
+        on_dismiss_error: Callable,
         local_folder: str = "",
         workdrive_url: str = "https://workdrive.zoho.eu",
     ):
         self.on_sync_now = on_sync_now
         self.on_open_conflicts = on_open_conflicts
         self.on_quit = on_quit
+        self.on_dismiss_error = on_dismiss_error
         self.local_folder = local_folder
         self.workdrive_url = workdrive_url
         self._state = TrayState.IDLE
@@ -86,6 +88,12 @@ class SyncTray:
         self._status_item = Gtk.MenuItem(label="Status: Idle")
         self._status_item.set_sensitive(False)
         self.menu.append(self._status_item)
+
+        self._dismiss_item = Gtk.MenuItem(label="Dismiss Error")
+        self._dismiss_item.connect("activate", lambda _: self.on_dismiss_error())
+        self._dismiss_item.set_no_show_all(True)
+        self.menu.append(self._dismiss_item)
+
         self.menu.append(Gtk.SeparatorMenuItem())
 
         item_sync = Gtk.MenuItem(label="Sync Now")
@@ -124,6 +132,11 @@ class SyncTray:
         icon = self._icon_name(self._state)
         logger.debug("Tray update: state=%s icon=%s text=%s", self._state, icon, self._status_text)
         self._status_item.set_label(f"Status: {self._status_text}")
+
+        if self._state == TrayState.ERROR:
+            self._dismiss_item.show()
+        else:
+            self._dismiss_item.hide()
 
         if HAS_APPINDICATOR:
             self.indicator.set_icon_full(icon, self._status_text)
