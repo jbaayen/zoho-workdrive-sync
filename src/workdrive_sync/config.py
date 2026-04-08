@@ -26,6 +26,7 @@ class Config:
     remote_folder_id: str = ""
     remote_folder_name: str = ""
     team_id: str = ""
+    workspace_id: str = ""
     interval_seconds: int = 300
 
 

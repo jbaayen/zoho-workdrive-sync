@@ -131,6 +131,7 @@ def first_run_setup() -> Config:
         remote_folder_id=remote_folder["id"],
         remote_folder_name=remote_folder.get("attributes", {}).get("name", ""),
         team_id=team_id,
+        workspace_id=ws["id"],
     )
     save_config(cfg)
     print(f"\nConfiguration saved. Syncing: {local_folder} <-> {cfg.remote_folder_name}")
@@ -155,6 +156,7 @@ class App:
             on_quit=self._quit,
             on_dismiss_error=self._dismiss_error,
             local_folder=cfg.local_folder,
+            workdrive_url=self._build_workdrive_url(cfg),
         )
 
         # Start file watcher
@@ -163,6 +165,13 @@ class App:
         # Start sync loop in background thread
         self._sync_thread = threading.Thread(target=self._sync_loop, daemon=True)
         self._sync_thread.start()
+
+    @staticmethod
+    def _build_workdrive_url(cfg: Config) -> str:
+        base = f"https://workplace.zoho.eu/#workdrive_app/{cfg.team_id}/teams/{cfg.team_id}/ws/{cfg.workspace_id}"
+        if cfg.remote_folder_id == cfg.workspace_id:
+            return f"{base}/folders/files"
+        return f"{base}/folders/{cfg.remote_folder_id}"
 
     def _start_watcher(self) -> None:
         """Start watchdog filesystem observer with debounced sync trigger."""
