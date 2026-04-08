@@ -20,7 +20,7 @@ for _ns in ("AyatanaAppIndicator3", "AppIndicator3"):
     except (ValueError, ImportError):
         continue
 
-from gi.repository import Gtk, GLib
+from gi.repository import Gtk, GLib, Pango
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +87,9 @@ class SyncTray:
 
         self._status_item = Gtk.MenuItem(label="Status: Idle")
         self._status_item.set_sensitive(False)
+        status_label = self._status_item.get_child()
+        status_label.set_max_width_chars(60)
+        status_label.set_ellipsize(Pango.EllipsizeMode.END)
         self.menu.append(self._status_item)
 
         self._dismiss_item = Gtk.MenuItem(label="Dismiss Error")
