@@ -27,7 +27,7 @@ class Config:
     remote_folder_name: str = ""
     team_id: str = ""
     workspace_id: str = ""
-    interval_seconds: int = 300
+    interval_seconds: int = 900
 
 
 def ensure_config_dir() -> None:

@@ -64,7 +64,7 @@ Two-way delta sync using a SQLite state database that tracks each file's local S
 
 ### Triggers
 
-- **Periodic**: every 300 seconds (configurable via `interval_seconds` in config)
+- **Periodic**: every 900 seconds (configurable via `interval_seconds` in config)
 - **Filesystem watcher**: detects local changes via watchdog (debounced 5 seconds)
 - **Manual**: "Sync Now" from the tray menu
 
