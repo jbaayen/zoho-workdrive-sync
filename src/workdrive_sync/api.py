@@ -39,9 +39,19 @@ class WorkDriveAPI:
         if elapsed < self.REQUEST_INTERVAL:
             time.sleep(self.REQUEST_INTERVAL - elapsed)
 
-        for attempt in range(5):
+        max_attempts = 5
+        for attempt in range(max_attempts):
             self._last_request_time = time.time()
-            resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
+            try:
+                resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # Retry transient network errors with exponential backoff
+                if attempt < max_attempts - 1:
+                    wait = min(2 ** attempt * 2, 60)
+                    logger.warning("Network error (%s), retrying in %ds...", e, wait)
+                    time.sleep(wait)
+                    continue
+                raise
 
             # Retry once on 401 (token expired mid-request)
             if resp.status_code == 401 and attempt == 0:
@@ -50,9 +60,19 @@ class WorkDriveAPI:
                 continue
 
             # Retry on 429 with exponential backoff
-            if resp.status_code == 429:
+            if resp.status_code == 429 and attempt < max_attempts - 1:
                 wait = min(2 ** attempt * 10, 120)
                 logger.warning("Rate limited, retrying in %ds...", wait)
+                time.sleep(wait)
+                continue
+
+            # Retry on 5xx server errors with exponential backoff
+            if 500 <= resp.status_code < 600 and attempt < max_attempts - 1:
+                wait = min(2 ** attempt * 2, 60)
+                logger.warning(
+                    "Server error %d on %s %s, retrying in %ds...",
+                    resp.status_code, method, url, wait,
+                )
                 time.sleep(wait)
                 continue
 
