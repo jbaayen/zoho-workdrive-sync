@@ -75,8 +75,17 @@ class WorkDriveAPI:
                 time.sleep(wait)
                 continue
 
-            # Retry on 5xx server errors with exponential backoff
+            # Retry on 5xx server errors with exponential backoff, but
+            # skip retries when Zoho returns a structured application
+            # error (e.g. F000 LESS_THAN_MIN_OCCURANCE) — those are
+            # permanent validation failures, not transient hiccups.
             if 500 <= resp.status_code < 600 and attempt < max_attempts - 1:
+                if self._is_permanent_api_error(resp):
+                    logger.error(
+                        "Permanent API error %d on %s %s: %s",
+                        resp.status_code, method, url, resp.text,
+                    )
+                    break
                 wait = min(2 ** attempt * 2, 60)
                 logger.warning(
                     "Server error %d on %s %s, retrying in %ds...",
@@ -94,6 +103,21 @@ class WorkDriveAPI:
 
     def _json(self, method: str, url: str, **kwargs) -> Dict[str, Any]:
         return self._request(method, url, **kwargs).json()
+
+    @staticmethod
+    def _is_permanent_api_error(resp: requests.Response) -> bool:
+        """Return True if the response carries a Zoho application error.
+
+        Zoho returns 5xx with a JSON body like
+        {"errors":[{"id":"F000","title":"..."}]} for permanent validation
+        failures. These are not worth retrying.
+        """
+        try:
+            body = resp.json()
+        except ValueError:
+            return False
+        errors = body.get("errors") if isinstance(body, dict) else None
+        return bool(errors)
 
     # ------------------------------------------------------------------
     # Workspace / team discovery
@@ -161,12 +185,17 @@ class WorkDriveAPI:
             })
         return data.get("data", [{}])[0] if data.get("data") else data
 
-    def update_file(self, file_id: str, local_path: Path) -> Dict[str, Any]:
-        """Upload a new version of an existing file."""
+    def update_file(self, parent_id: str, local_path: Path) -> Dict[str, Any]:
+        """Upload a new version of an existing file.
+
+        Zoho's /upload endpoint matches by parent_id + filename; setting
+        override-name-exist=true replaces the existing file in place
+        (creating a new version) instead of creating a duplicate.
+        """
         with open(local_path, "rb") as f:
             data = self._json("POST", f"{API_BASE}/upload", params={
                 "filename": local_path.name,
-                "resource_id": file_id,
+                "parent_id": parent_id,
                 "override-name-exist": "true",
             }, files={
                 "content": (local_path.name, f, "application/octet-stream"),
