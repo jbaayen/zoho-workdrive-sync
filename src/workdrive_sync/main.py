@@ -15,6 +15,7 @@ from .api import WorkDriveAPI
 from .auth import ZohoAuth, SCOPES
 from .config import Config, load_config, save_config
 from .conflicts import resolve_conflicts
+from .errors import show_errors
 from .state import StateDB
 from .sync import SyncEngine
 from .tray import SyncTray, TrayState
@@ -149,12 +150,13 @@ class App:
         self.engine = SyncEngine(self.api, self.db, Path(cfg.local_folder), cfg.remote_folder_id)
         self._stop = threading.Event()
         self._pending_conflicts = []
+        self._errors: list[str] = []
 
         self.tray = SyncTray(
             on_sync_now=self._trigger_sync,
             on_open_conflicts=self._show_conflicts,
             on_quit=self._quit,
-            on_dismiss_error=self._dismiss_error,
+            on_show_errors=self._show_errors,
             local_folder=cfg.local_folder,
             workdrive_url=self._build_workdrive_url(cfg),
         )
@@ -228,13 +230,14 @@ class App:
                 # Show conflict dialog on GTK thread
                 GLib.idle_add(self._show_conflicts)
             elif errors:
-                self.tray.set_state(TrayState.ERROR, self._format_errors(errors))
+                self._set_errors(errors)
             else:
+                self._errors = []
                 self.tray.set_state(TrayState.IDLE, "Synced")
 
         except Exception as e:
             logger.exception("Sync failed")
-            self.tray.set_state(TrayState.ERROR, str(e))
+            self._set_errors([str(e)])
 
     def _show_conflicts(self) -> None:
         if not self._pending_conflicts:
@@ -248,19 +251,25 @@ class App:
         self.tray.set_state(TrayState.SYNCING, "Resolving conflicts...")
         errors = self.engine.execute(items)
         if errors:
-            self.tray.set_state(TrayState.ERROR, self._format_errors(errors))
+            self._set_errors(errors)
         else:
+            self._errors = []
             self.tray.set_state(TrayState.IDLE, "Synced")
 
-    @staticmethod
-    def _format_errors(errors: list[str]) -> str:
-        msg = errors[0]
-        if len(errors) > 1:
-            msg += f" (+{len(errors) - 1} more)"
-        return msg
+    def _set_errors(self, errors: list[str]) -> None:
+        self._errors = list(errors)
+        count = len(self._errors)
+        label = f"{count} error" + ("s" if count != 1 else "")
+        self.tray.set_state(TrayState.ERROR, label)
 
-    def _dismiss_error(self) -> None:
-        self.tray.set_state(TrayState.IDLE, "Idle")
+    def _show_errors(self) -> None:
+        """Open the error dialog. Called from the GTK main thread."""
+        if not self._errors:
+            return
+        ignore_all = show_errors(self._errors)
+        if ignore_all:
+            self._errors = []
+            self.tray.set_state(TrayState.IDLE, "Idle")
 
     def _quit(self) -> None:
         self._stop.set()

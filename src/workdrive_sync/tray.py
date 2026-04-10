@@ -49,14 +49,14 @@ class SyncTray:
         on_sync_now: Callable,
         on_open_conflicts: Callable,
         on_quit: Callable,
-        on_dismiss_error: Callable,
+        on_show_errors: Callable,
         local_folder: str = "",
         workdrive_url: str = "https://workdrive.zoho.eu",
     ):
         self.on_sync_now = on_sync_now
         self.on_open_conflicts = on_open_conflicts
         self.on_quit = on_quit
-        self.on_dismiss_error = on_dismiss_error
+        self.on_show_errors = on_show_errors
         self.local_folder = local_folder
         self.workdrive_url = workdrive_url
         self._state = TrayState.IDLE
@@ -92,10 +92,10 @@ class SyncTray:
         status_label.set_ellipsize(Pango.EllipsizeMode.END)
         self.menu.append(self._status_item)
 
-        self._dismiss_item = Gtk.MenuItem(label="Dismiss Error")
-        self._dismiss_item.connect("activate", lambda _: self.on_dismiss_error())
-        self._dismiss_item.set_no_show_all(True)
-        self.menu.append(self._dismiss_item)
+        self._errors_item = Gtk.MenuItem(label="Show Errors...")
+        self._errors_item.connect("activate", lambda _: self.on_show_errors())
+        self._errors_item.set_no_show_all(True)
+        self.menu.append(self._errors_item)
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
@@ -137,9 +137,9 @@ class SyncTray:
         self._status_item.set_label(f"Status: {self._status_text}")
 
         if self._state == TrayState.ERROR:
-            self._dismiss_item.show()
+            self._errors_item.show()
         else:
-            self._dismiss_item.hide()
+            self._errors_item.hide()
 
         if HAS_APPINDICATOR:
             self.indicator.set_icon_full(icon, self._status_text)
