@@ -170,8 +170,12 @@ class App:
 
     @staticmethod
     def _build_workdrive_url(cfg: Config) -> str:
-        base = f"https://workplace.zoho.eu/#workdrive_app/{cfg.team_id}/teams/{cfg.team_id}/ws/{cfg.workspace_id}"
-        if cfg.remote_folder_id == cfg.workspace_id:
+        # Fall back to remote_folder_id for older configs that didn't
+        # persist workspace_id — in that case the synced folder is the
+        # top-level team folder, which doubles as the workspace slot.
+        workspace_id = cfg.workspace_id or cfg.remote_folder_id
+        base = f"https://workplace.zoho.eu/#workdrive_app/{cfg.team_id}/teams/{cfg.team_id}/ws/{workspace_id}"
+        if cfg.remote_folder_id == workspace_id:
             return f"{base}/folders/files"
         return f"{base}/folders/{cfg.remote_folder_id}"
 
