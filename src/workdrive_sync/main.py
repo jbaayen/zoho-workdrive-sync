@@ -151,6 +151,7 @@ class App:
         self._stop = threading.Event()
         self._pending_conflicts = []
         self._errors: list[str] = []
+        self._sync_lock = threading.Lock()
 
         self.tray = SyncTray(
             on_sync_now=self._trigger_sync,
@@ -221,27 +222,36 @@ class App:
         threading.Thread(target=self._do_sync, daemon=True).start()
 
     def _do_sync(self) -> None:
-        self.tray.set_state(TrayState.SYNCING, "Syncing...")
+        # Skip if another sync is already running. The watcher debounce can
+        # fire during a long sync (e.g. because downloads create FS events),
+        # and overlapping runs just multiply API pressure and trip 429s.
+        if not self._sync_lock.acquire(blocking=False):
+            logger.debug("Sync already in progress, skipping trigger")
+            return
         try:
-            actions, conflicts = self.engine.scan()
+            self.tray.set_state(TrayState.SYNCING, "Syncing...")
+            try:
+                actions, conflicts = self.engine.scan()
 
-            # Execute non-conflicting actions
-            errors = self.engine.execute(actions)
+                # Execute non-conflicting actions
+                errors = self.engine.execute(actions)
 
-            if conflicts:
-                self._pending_conflicts = conflicts
-                self.tray.set_state(TrayState.CONFLICT, f"{len(conflicts)} conflict(s)")
-                # Show conflict dialog on GTK thread
-                GLib.idle_add(self._show_conflicts)
-            elif errors:
-                self._set_errors(errors)
-            else:
-                self._errors = []
-                self.tray.set_state(TrayState.IDLE, "Synced")
+                if conflicts:
+                    self._pending_conflicts = conflicts
+                    self.tray.set_state(TrayState.CONFLICT, f"{len(conflicts)} conflict(s)")
+                    # Show conflict dialog on GTK thread
+                    GLib.idle_add(self._show_conflicts)
+                elif errors:
+                    self._set_errors(errors)
+                else:
+                    self._errors = []
+                    self.tray.set_state(TrayState.IDLE, "Synced")
 
-        except Exception as e:
-            logger.exception("Sync failed")
-            self._set_errors([str(e)])
+            except Exception as e:
+                logger.exception("Sync failed")
+                self._set_errors([str(e)])
+        finally:
+            self._sync_lock.release()
 
     def _show_conflicts(self) -> None:
         if not self._pending_conflicts:
