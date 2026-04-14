@@ -32,6 +32,8 @@ class Config:
 
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    # Restrict directory to owner only; client_secret and refresh token live here.
+    CONFIG_DIR.chmod(0o700)
 
 
 def load_config() -> Config:
@@ -49,6 +51,8 @@ def save_config(cfg: Config) -> None:
     ensure_config_dir()
     from dataclasses import asdict
     CONFIG_FILE.write_text(json.dumps(asdict(cfg), indent=2))
+    # Contains client_secret — restrict to owner only.
+    CONFIG_FILE.chmod(0o600)
 
 
 def load_refresh_token() -> Optional[str]:
