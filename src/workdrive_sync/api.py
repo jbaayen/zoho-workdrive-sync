@@ -227,6 +227,8 @@ class WorkDriveAPI:
         for item in self.list_folder(folder_id):
             attrs = item.get("attributes", {})
             name = attrs.get("name", "")
+            if name.startswith("."):
+                continue
             rel = f"{prefix}/{name}" if prefix else name
             is_folder = attrs.get("is_folder", False)
 

@@ -38,6 +38,11 @@ class Resolution(Enum):
     SKIP = "Skip"
 
 
+def _is_hidden(rel_path: str) -> bool:
+    """True if any path component starts with a dot."""
+    return any(part.startswith(".") for part in Path(rel_path).parts)
+
+
 @dataclass
 class SyncItem:
     rel_path: str
@@ -64,10 +69,13 @@ class SyncEngine:
         """Scan local and remote, return (actions, conflicts)."""
         known = self.db.all()
 
-        # Scan local filesystem
+        # Scan local filesystem (skip hidden files/dirs starting with ".")
         local_files: Dict[str, Tuple[float, str]] = {}  # rel_path -> (mtime, hash)
-        for root, _dirs, files in os.walk(self.local_root):
+        for root, dirs, files in os.walk(self.local_root):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
             for name in files:
+                if name.startswith("."):
+                    continue
                 full = Path(root) / name
                 rel = str(full.relative_to(self.local_root))
                 try:
@@ -80,11 +88,12 @@ class SyncEngine:
         remote_files: Dict[str, Dict] = {}  # rel_path -> item dict
         for item in self.api.walk_remote(self.remote_folder_id):
             rel = item.get("rel_path", "")
-            if rel:
+            if rel and not _is_hidden(rel):
                 remote_files[rel] = item
 
-        # Collect all known paths
-        all_paths = set(known.keys()) | set(local_files.keys()) | set(remote_files.keys())
+        # Collect all known paths (excluding any legacy hidden entries)
+        known_paths = {p for p in known.keys() if not _is_hidden(p)}
+        all_paths = known_paths | set(local_files.keys()) | set(remote_files.keys())
 
         actions: List[SyncItem] = []
         conflicts: List[SyncItem] = []
