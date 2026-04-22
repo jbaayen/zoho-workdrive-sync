@@ -67,7 +67,10 @@ class SyncEngine:
 
     def scan(self) -> Tuple[List[SyncItem], List[SyncItem]]:
         """Scan local and remote, return (actions, conflicts)."""
+        logger.info("scan: starting (local_root=%s remote_folder_id=%s)",
+                    self.local_root, self.remote_folder_id)
         known = self.db.all()
+        logger.info("scan: %d entries in state DB", len(known))
 
         # Scan local filesystem (skip hidden files/dirs starting with ".")
         local_files: Dict[str, Tuple[float, str]] = {}  # rel_path -> (mtime, hash)
@@ -84,12 +87,15 @@ class SyncEngine:
                 except OSError:
                     pass
 
+        logger.info("scan: found %d local files", len(local_files))
+
         # Scan remote
         remote_files: Dict[str, Dict] = {}  # rel_path -> item dict
         for item in self.api.walk_remote(self.remote_folder_id):
             rel = item.get("rel_path", "")
             if rel and not _is_hidden(rel):
                 remote_files[rel] = item
+        logger.info("scan: found %d remote files", len(remote_files))
 
         # Collect all known paths (excluding any legacy hidden entries)
         known_paths = {p for p in known.keys() if not _is_hidden(p)}
@@ -170,6 +176,11 @@ class SyncEngine:
             elif item.action != Action.SKIP:
                 actions.append(item)
 
+        logger.info("scan: done -- %d actions, %d conflicts", len(actions), len(conflicts))
+        for a in actions:
+            logger.info("  action: %s %s", a.action.name, a.rel_path)
+        for c in conflicts:
+            logger.info("  conflict: %s %s", c.conflict_type.value if c.conflict_type else "?", c.rel_path)
         return actions, conflicts
 
     def execute(self, items: List[SyncItem]) -> List[str]:

@@ -223,8 +223,11 @@ class WorkDriveAPI:
 
         Returns a flat list with an extra 'rel_path' key on each item.
         """
+        logger.info("walk_remote: entering %s (id=%s)", prefix or "<root>", folder_id)
         result = []
-        for item in self.list_folder(folder_id):
+        items = self.list_folder(folder_id)
+        logger.info("walk_remote: %s has %d entries", prefix or "<root>", len(items))
+        for item in items:
             attrs = item.get("attributes", {})
             name = attrs.get("name", "")
             if name.startswith("."):
@@ -234,8 +237,10 @@ class WorkDriveAPI:
 
             item["rel_path"] = rel
             if is_folder:
+                logger.info("walk_remote: descend -> %s", rel)
                 result.extend(self.walk_remote(item["id"], rel))
             else:
+                logger.debug("walk_remote: file -> %s", rel)
                 result.append(item)
         return result
 
