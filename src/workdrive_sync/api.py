@@ -20,15 +20,23 @@ PAGE_LIMIT = 1000
 
 
 class WorkDriveAPI:
-    """Thin wrapper around the Zoho WorkDrive v1 API."""
+    """Thin wrapper around the Zoho WorkDrive v1 API.
 
-    # Minimum delay between API calls to avoid rate limiting.
-    # Zoho WorkDrive's default limit is ~60 req/min, so stay at 1 req/s.
-    REQUEST_INTERVAL = 1.0  # seconds
+    Pacing follows rclone's WorkDrive backend: sleep a decaying interval
+    between requests (min 10ms, max 60s). On retryable errors the sleep
+    doubles (capped at MAX_SLEEP); 429 forces a 60s cool-off. On each
+    success the sleep halves, recovering toward MIN_SLEEP.
+    """
+
+    MIN_SLEEP = 0.01   # seconds
+    MAX_SLEEP = 60.0
+    DECAY = 2.0
+    RATE_LIMIT_COOLOFF = 60.0
 
     def __init__(self, auth: ZohoAuth):
         self.auth = auth
         self._last_request_time = 0.0
+        self._current_sleep = self.MIN_SLEEP
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -36,54 +44,64 @@ class WorkDriveAPI:
             "Accept": "application/vnd.api+json",
         }
 
+    def _pacer_increase(self, reason: str) -> None:
+        old = self._current_sleep
+        self._current_sleep = min(self._current_sleep * self.DECAY, self.MAX_SLEEP)
+        logger.warning("Pacer backoff (%s): %.3fs -> %.3fs", reason, old, self._current_sleep)
+
+    def _pacer_set_cooloff(self, wait: float, reason: str) -> None:
+        old = self._current_sleep
+        self._current_sleep = min(max(wait, old), self.MAX_SLEEP)
+        logger.warning("Pacer cool-off (%s): %.3fs -> %.3fs", reason, old, self._current_sleep)
+
+    def _pacer_decrease(self) -> None:
+        if self._current_sleep <= self.MIN_SLEEP:
+            return
+        old = self._current_sleep
+        self._current_sleep = max(self._current_sleep / self.DECAY, self.MIN_SLEEP)
+        if self._current_sleep == self.MIN_SLEEP and old > self.MIN_SLEEP:
+            logger.info("Pacer recovered to MIN_SLEEP %.3fs", self.MIN_SLEEP)
+
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         headers = kwargs.pop("headers", {})
         headers.update(self._headers())
 
-        # Throttle requests to stay under rate limit
-        elapsed = time.time() - self._last_request_time
-        if elapsed < self.REQUEST_INTERVAL:
-            time.sleep(self.REQUEST_INTERVAL - elapsed)
-
         max_attempts = 5
+        resp: Optional[requests.Response] = None
         for attempt in range(max_attempts):
+            elapsed = time.time() - self._last_request_time
+            if elapsed < self._current_sleep:
+                time.sleep(self._current_sleep - elapsed)
             self._last_request_time = time.time()
+
             try:
                 resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
             except (requests.ConnectionError, requests.Timeout) as e:
-                # Retry transient network errors with exponential backoff
                 if attempt < max_attempts - 1:
-                    wait = min(2 ** attempt * 2, 60)
-                    logger.warning("Network error (%s), retrying in %ds...", e, wait)
-                    time.sleep(wait)
+                    self._pacer_increase(f"network error: {e}")
                     continue
                 raise
 
-            # Retry once on 401 (token expired mid-request)
+            # Retry once on 401 (token expired mid-request); doesn't affect pacer.
             if resp.status_code == 401 and attempt == 0:
                 self.auth._access_token = None
                 headers.update(self._headers())
                 continue
 
-            # Retry on 429, honoring Retry-After when present
             if resp.status_code == 429 and attempt < max_attempts - 1:
                 retry_after = resp.headers.get("Retry-After")
-                wait: float
+                wait = self.RATE_LIMIT_COOLOFF
                 if retry_after:
                     try:
-                        wait = float(retry_after)
+                        wait = max(float(retry_after), self.RATE_LIMIT_COOLOFF)
                     except ValueError:
-                        wait = min(2 ** attempt * 10, 300)
-                else:
-                    wait = min(2 ** attempt * 10, 300)
-                logger.warning("Rate limited, retrying in %.0fs...", wait)
-                time.sleep(wait)
+                        pass
+                self._pacer_set_cooloff(wait, "429")
                 continue
 
-            # Retry on 5xx server errors with exponential backoff, but
-            # skip retries when Zoho returns a structured application
-            # error (e.g. F000 LESS_THAN_MIN_OCCURANCE) — those are
-            # permanent validation failures, not transient hiccups.
+            # Retry on 5xx except for structured application errors
+            # (e.g. F000 LESS_THAN_MIN_OCCURANCE) which are permanent
+            # validation failures, not transient hiccups.
             if 500 <= resp.status_code < 600 and attempt < max_attempts - 1:
                 if self._is_permanent_api_error(resp):
                     logger.error(
@@ -91,17 +109,15 @@ class WorkDriveAPI:
                         resp.status_code, method, url, resp.text,
                     )
                     break
-                wait = min(2 ** attempt * 2, 60)
-                logger.warning(
-                    "Server error %d on %s %s, retrying in %ds...",
-                    resp.status_code, method, url, wait,
-                )
-                time.sleep(wait)
+                self._pacer_increase(f"server error {resp.status_code}")
                 continue
 
             break
 
-        if not resp.ok:
+        assert resp is not None
+        if resp.ok:
+            self._pacer_decrease()
+        else:
             logger.error("API %s %s → %s: %s", method, url, resp.status_code, resp.text)
         resp.raise_for_status()
         return resp
