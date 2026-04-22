@@ -91,7 +91,7 @@ class SyncEngine:
 
         # Scan remote
         remote_files: Dict[str, Dict] = {}  # rel_path -> item dict
-        for item in self.api.walk_remote(self.remote_folder_id):
+        for item in self.api.walk_remote(self.remote_folder_id, db=self.db):
             rel = item.get("rel_path", "")
             if rel and not _is_hidden(rel):
                 remote_files[rel] = item
@@ -201,7 +201,7 @@ class SyncEngine:
 
         if item.action == Action.UPLOAD:
             logger.info(f"Uploading: {rel}")
-            parent_id = self.api.ensure_remote_dirs(self.remote_folder_id, rel)
+            parent_id = self.api.ensure_remote_dirs(self.remote_folder_id, rel, db=self.db)
             if item.remote_id:
                 result = self.api.update_file(parent_id, local)
             else:

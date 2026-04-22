@@ -248,10 +248,12 @@ class WorkDriveAPI:
     # Helpers
     # ------------------------------------------------------------------
 
-    def walk_remote(self, folder_id: str, prefix: str = "") -> List[Dict[str, Any]]:
+    def walk_remote(self, folder_id: str, prefix: str = "", db=None, parent_id: str = "") -> List[Dict[str, Any]]:
         """Recursively list all files under a folder.
 
         Returns a flat list with an extra 'rel_path' key on each item.
+        If ``db`` is provided, folder paths are upserted into its folders
+        table so later uploads can resolve parent ids without relisting.
         """
         logger.info("walk_remote: entering %s (id=%s)", prefix or "<root>", folder_id)
         result = []
@@ -268,18 +270,34 @@ class WorkDriveAPI:
             item["rel_path"] = rel
             if is_folder:
                 logger.info("walk_remote: descend -> %s", rel)
-                result.extend(self.walk_remote(item["id"], rel))
+                if db is not None:
+                    db.upsert_folder(rel, item["id"], folder_id)
+                result.extend(self.walk_remote(item["id"], rel, db=db, parent_id=folder_id))
             else:
                 logger.debug("walk_remote: file -> %s", rel)
                 result.append(item)
         return result
 
-    def ensure_remote_dirs(self, folder_id: str, rel_path: str) -> str:
-        """Create intermediate directories and return the leaf folder ID."""
+    def ensure_remote_dirs(self, folder_id: str, rel_path: str, db=None) -> str:
+        """Create intermediate directories and return the leaf folder id.
+
+        With ``db`` provided, consults the folder cache first for each path
+        segment before falling back to a list_folder call. Newly resolved
+        or created folders are written back to the cache.
+        """
         parts = Path(rel_path).parent.parts
         current_id = folder_id
+        segment_rel = ""
         for part in parts:
-            # Check if subfolder already exists
+            segment_rel = f"{segment_rel}/{part}" if segment_rel else part
+
+            if db is not None:
+                cached = db.get_folder(segment_rel)
+                if cached and cached[1] == current_id:
+                    current_id = cached[0]
+                    continue
+
+            # Cache miss (or wrong parent): list and look for the child.
             children = self.list_folder(current_id)
             found = None
             for child in children:
@@ -288,8 +306,12 @@ class WorkDriveAPI:
                     found = child["id"]
                     break
             if found:
-                current_id = found
+                next_id = found
             else:
                 new_folder = self.create_folder(current_id, part)
-                current_id = new_folder.get("id", new_folder.get("data", {}).get("id", ""))
+                next_id = new_folder.get("id", new_folder.get("data", {}).get("id", ""))
+
+            if db is not None and next_id:
+                db.upsert_folder(segment_rel, next_id, current_id)
+            current_id = next_id
         return current_id
