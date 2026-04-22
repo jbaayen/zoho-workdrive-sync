@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 def setup_logging() -> None:
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
@@ -152,6 +152,12 @@ class App:
         self._pending_conflicts = []
         self._errors: list[str] = []
         self._sync_lock = threading.Lock()
+        # Set while a full sync is in flight so a saved file isn't dropped;
+        # the full sync drains this with one fast-upload pass before exiting.
+        self._pending_fast_upload = False
+        # Watchdog ignores events until this wall-clock time. Bumped after
+        # syncs so downloads don't trigger an immediate fast-upload pass.
+        self._suppress_watcher_until = 0.0
 
         self.tray = SyncTray(
             on_sync_now=self._trigger_sync,
@@ -186,6 +192,8 @@ class App:
             from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
 
+            app = self
+
             class Handler(FileSystemEventHandler):
                 def __init__(self, trigger):
                     self._trigger = trigger
@@ -199,11 +207,14 @@ class App:
                     self._timer.start()
 
                 def on_any_event(self, event):
-                    if not event.is_directory:
-                        self._debounce()
+                    if event.is_directory:
+                        return
+                    if time.time() < app._suppress_watcher_until:
+                        return
+                    self._debounce()
 
             self._observer = Observer()
-            self._observer.schedule(Handler(self._trigger_sync), self.cfg.local_folder, recursive=True)
+            self._observer.schedule(Handler(self._trigger_fast_upload), self.cfg.local_folder, recursive=True)
             self._observer.start()
             logger.info(f"Watching: {self.cfg.local_folder}")
         except ImportError:
@@ -218,8 +229,35 @@ class App:
             self._stop.wait(self.cfg.interval_seconds)
 
     def _trigger_sync(self) -> None:
-        """Trigger an immediate sync (from tray or watchdog)."""
+        """Trigger an immediate full sync (from tray "Sync Now")."""
         threading.Thread(target=self._do_sync, daemon=True).start()
+
+    def _trigger_fast_upload(self) -> None:
+        """Trigger a local-only fast-upload pass (from the watcher)."""
+        threading.Thread(target=self._do_fast_upload, daemon=True).start()
+
+    def _do_fast_upload(self) -> None:
+        if not self._sync_lock.acquire(blocking=False):
+            # A full sync is in flight; it will drain pending work when done.
+            self._pending_fast_upload = True
+            return
+        try:
+            start = time.time()
+            items = self.engine.scan_local_changes()
+            if not items:
+                return
+            self.tray.set_state(TrayState.SYNCING, f"Uploading {len(items)}...")
+            errors = self.engine.quick_upload(items)
+            logger.info("fast-upload: %d file(s) in %.1fs", len(items), time.time() - start)
+            if errors:
+                self._set_errors(errors)
+            elif not self._errors:
+                self.tray.set_state(TrayState.IDLE, "Synced")
+        finally:
+            # Give downloads/writes from this pass a window to settle so
+            # the watcher doesn't immediately re-fire on our own changes.
+            self._suppress_watcher_until = time.time() + 10
+            self._sync_lock.release()
 
     def _do_sync(self) -> None:
         # Skip if another sync is already running. The watcher debounce can
@@ -250,7 +288,22 @@ class App:
             except Exception as e:
                 logger.exception("Sync failed")
                 self._set_errors([str(e)])
+
+            # Drain any fast-upload requests that arrived while we were
+            # scanning, so a save made mid-sync still lands promptly.
+            if self._pending_fast_upload:
+                self._pending_fast_upload = False
+                try:
+                    pending_items = self.engine.scan_local_changes()
+                    if pending_items:
+                        logger.info("drain: %d pending fast-upload item(s)", len(pending_items))
+                        drain_errors = self.engine.quick_upload(pending_items)
+                        if drain_errors:
+                            self._set_errors(list(self._errors) + drain_errors)
+                except Exception:
+                    logger.exception("Pending fast-upload drain failed")
         finally:
+            self._suppress_watcher_until = time.time() + 10
             self._sync_lock.release()
 
     def _show_conflicts(self) -> None:

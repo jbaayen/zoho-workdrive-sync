@@ -67,7 +67,10 @@ class SyncEngine:
 
     def scan(self) -> Tuple[List[SyncItem], List[SyncItem]]:
         """Scan local and remote, return (actions, conflicts)."""
+        logger.info("scan: starting (local_root=%s remote_folder_id=%s)",
+                    self.local_root, self.remote_folder_id)
         known = self.db.all()
+        logger.info("scan: %d entries in state DB", len(known))
 
         # Scan local filesystem (skip hidden files/dirs starting with ".")
         local_files: Dict[str, Tuple[float, str]] = {}  # rel_path -> (mtime, hash)
@@ -84,12 +87,15 @@ class SyncEngine:
                 except OSError:
                     pass
 
+        logger.info("scan: found %d local files", len(local_files))
+
         # Scan remote
         remote_files: Dict[str, Dict] = {}  # rel_path -> item dict
-        for item in self.api.walk_remote(self.remote_folder_id):
+        for item in self.api.walk_remote(self.remote_folder_id, db=self.db):
             rel = item.get("rel_path", "")
             if rel and not _is_hidden(rel):
                 remote_files[rel] = item
+        logger.info("scan: found %d remote files", len(remote_files))
 
         # Collect all known paths (excluding any legacy hidden entries)
         known_paths = {p for p in known.keys() if not _is_hidden(p)}
@@ -170,6 +176,11 @@ class SyncEngine:
             elif item.action != Action.SKIP:
                 actions.append(item)
 
+        logger.info("scan: done -- %d actions, %d conflicts", len(actions), len(conflicts))
+        for a in actions:
+            logger.info("  action: %s %s", a.action.name, a.rel_path)
+        for c in conflicts:
+            logger.info("  conflict: %s %s", c.conflict_type.value if c.conflict_type else "?", c.rel_path)
         return actions, conflicts
 
     def execute(self, items: List[SyncItem]) -> List[str]:
@@ -184,17 +195,77 @@ class SyncEngine:
                 errors.append(msg)
         return errors
 
+    def scan_local_changes(self) -> List[SyncItem]:
+        """Scan only the local filesystem; return UPLOAD candidates.
+
+        Used by the fast-upload path triggered from the filesystem watcher.
+        Deletes and remote-originating changes are intentionally ignored —
+        they fall through to the next full reconcile via scan().
+        """
+        items: List[SyncItem] = []
+        for root, dirs, files in os.walk(self.local_root):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for name in files:
+                if name.startswith("."):
+                    continue
+                full = Path(root) / name
+                rel = str(full.relative_to(self.local_root))
+                try:
+                    mtime = full.stat().st_mtime
+                except OSError:
+                    continue
+                rec = self.db.get(rel)
+                if rec is None:
+                    items.append(SyncItem(rel_path=rel, action=Action.UPLOAD, local_path=full))
+                    continue
+                if mtime == rec.local_mtime:
+                    continue
+                if file_hash(full) == rec.local_hash:
+                    continue
+                items.append(SyncItem(
+                    rel_path=rel,
+                    action=Action.UPLOAD,
+                    local_path=full,
+                    remote_id=rec.remote_id,
+                    remote_etag=rec.remote_etag,
+                    remote_modified=rec.remote_modified,
+                ))
+        return items
+
+    def quick_upload(self, items: List[SyncItem]) -> List[str]:
+        """Upload locally-changed files without a full remote walk.
+
+        Each candidate with a known remote_id is verified via a single
+        get_file_meta call; mismatched etag or a remote-gone (404) defers
+        the item to the next full reconcile rather than risking a clobber.
+        """
+        errors: List[str] = []
+        for item in items:
+            if item.remote_id:
+                meta = self.api.get_file_meta_or_none(item.remote_id)
+                if meta is None:
+                    logger.info("fast-upload deferred (remote gone): %s", item.rel_path)
+                    continue
+                current_etag = meta.get("attributes", {}).get("resource_etag", "")
+                if current_etag and current_etag != item.remote_etag:
+                    logger.info("fast-upload deferred (remote etag changed): %s", item.rel_path)
+                    continue
+            try:
+                self._execute_one(item)
+            except Exception as e:
+                msg = f"{item.rel_path}: {e}"
+                logger.error("Fast-upload failed for %s", msg)
+                errors.append(msg)
+        return errors
+
     def _execute_one(self, item: SyncItem) -> None:
         rel = item.rel_path
         local = self.local_root / rel
 
         if item.action == Action.UPLOAD:
             logger.info(f"Uploading: {rel}")
-            parent_id = self.api.ensure_remote_dirs(self.remote_folder_id, rel)
-            if item.remote_id:
-                result = self.api.update_file(parent_id, local)
-            else:
-                result = self.api.upload_file(parent_id, local)
+            parent_id = self.api.ensure_remote_dirs(self.remote_folder_id, rel, db=self.db)
+            result = self.api.upload_file(parent_id, local, override=bool(item.remote_id))
             # Upload response lacks etag/modified_time; fetch full metadata
             file_id = (result.get("id")
                        or result.get("attributes", {}).get("resource_id")

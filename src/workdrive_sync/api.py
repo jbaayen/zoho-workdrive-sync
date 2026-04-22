@@ -2,8 +2,10 @@
 
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 
@@ -13,17 +15,33 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://workdrive.zoho.eu/api/v1"
 
+# Cursor-paginated max page size for /files/{id}/files. rclone uses 1000
+# in production; higher values haven't been validated.
+PAGE_LIMIT = 1000
+
+# Files at or above this size use /stream/upload instead of the multipart
+# /upload endpoint — rclone's threshold.
+LARGE_FILE_CUTOFF = 10 * 1024 * 1024  # 10 MiB
+
 
 class WorkDriveAPI:
-    """Thin wrapper around the Zoho WorkDrive v1 API."""
+    """Thin wrapper around the Zoho WorkDrive v1 API.
 
-    # Minimum delay between API calls to avoid rate limiting.
-    # Zoho WorkDrive's default limit is ~60 req/min, so stay at 1 req/s.
-    REQUEST_INTERVAL = 1.0  # seconds
+    Pacing follows rclone's WorkDrive backend: sleep a decaying interval
+    between requests (min 10ms, max 60s). On retryable errors the sleep
+    doubles (capped at MAX_SLEEP); 429 forces a 60s cool-off. On each
+    success the sleep halves, recovering toward MIN_SLEEP.
+    """
+
+    MIN_SLEEP = 0.01   # seconds
+    MAX_SLEEP = 60.0
+    DECAY = 2.0
+    RATE_LIMIT_COOLOFF = 60.0
 
     def __init__(self, auth: ZohoAuth):
         self.auth = auth
         self._last_request_time = 0.0
+        self._current_sleep = self.MIN_SLEEP
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -31,54 +49,64 @@ class WorkDriveAPI:
             "Accept": "application/vnd.api+json",
         }
 
+    def _pacer_increase(self, reason: str) -> None:
+        old = self._current_sleep
+        self._current_sleep = min(self._current_sleep * self.DECAY, self.MAX_SLEEP)
+        logger.warning("Pacer backoff (%s): %.3fs -> %.3fs", reason, old, self._current_sleep)
+
+    def _pacer_set_cooloff(self, wait: float, reason: str) -> None:
+        old = self._current_sleep
+        self._current_sleep = min(max(wait, old), self.MAX_SLEEP)
+        logger.warning("Pacer cool-off (%s): %.3fs -> %.3fs", reason, old, self._current_sleep)
+
+    def _pacer_decrease(self) -> None:
+        if self._current_sleep <= self.MIN_SLEEP:
+            return
+        old = self._current_sleep
+        self._current_sleep = max(self._current_sleep / self.DECAY, self.MIN_SLEEP)
+        if self._current_sleep == self.MIN_SLEEP and old > self.MIN_SLEEP:
+            logger.info("Pacer recovered to MIN_SLEEP %.3fs", self.MIN_SLEEP)
+
     def _request(self, method: str, url: str, **kwargs) -> requests.Response:
         headers = kwargs.pop("headers", {})
         headers.update(self._headers())
 
-        # Throttle requests to stay under rate limit
-        elapsed = time.time() - self._last_request_time
-        if elapsed < self.REQUEST_INTERVAL:
-            time.sleep(self.REQUEST_INTERVAL - elapsed)
-
         max_attempts = 5
+        resp: Optional[requests.Response] = None
         for attempt in range(max_attempts):
+            elapsed = time.time() - self._last_request_time
+            if elapsed < self._current_sleep:
+                time.sleep(self._current_sleep - elapsed)
             self._last_request_time = time.time()
+
             try:
                 resp = requests.request(method, url, headers=headers, timeout=60, **kwargs)
             except (requests.ConnectionError, requests.Timeout) as e:
-                # Retry transient network errors with exponential backoff
                 if attempt < max_attempts - 1:
-                    wait = min(2 ** attempt * 2, 60)
-                    logger.warning("Network error (%s), retrying in %ds...", e, wait)
-                    time.sleep(wait)
+                    self._pacer_increase(f"network error: {e}")
                     continue
                 raise
 
-            # Retry once on 401 (token expired mid-request)
+            # Retry once on 401 (token expired mid-request); doesn't affect pacer.
             if resp.status_code == 401 and attempt == 0:
                 self.auth._access_token = None
                 headers.update(self._headers())
                 continue
 
-            # Retry on 429, honoring Retry-After when present
             if resp.status_code == 429 and attempt < max_attempts - 1:
                 retry_after = resp.headers.get("Retry-After")
-                wait: float
+                wait = self.RATE_LIMIT_COOLOFF
                 if retry_after:
                     try:
-                        wait = float(retry_after)
+                        wait = max(float(retry_after), self.RATE_LIMIT_COOLOFF)
                     except ValueError:
-                        wait = min(2 ** attempt * 10, 300)
-                else:
-                    wait = min(2 ** attempt * 10, 300)
-                logger.warning("Rate limited, retrying in %.0fs...", wait)
-                time.sleep(wait)
+                        pass
+                self._pacer_set_cooloff(wait, "429")
                 continue
 
-            # Retry on 5xx server errors with exponential backoff, but
-            # skip retries when Zoho returns a structured application
-            # error (e.g. F000 LESS_THAN_MIN_OCCURANCE) — those are
-            # permanent validation failures, not transient hiccups.
+            # Retry on 5xx except for structured application errors
+            # (e.g. F000 LESS_THAN_MIN_OCCURANCE) which are permanent
+            # validation failures, not transient hiccups.
             if 500 <= resp.status_code < 600 and attempt < max_attempts - 1:
                 if self._is_permanent_api_error(resp):
                     logger.error(
@@ -86,17 +114,15 @@ class WorkDriveAPI:
                         resp.status_code, method, url, resp.text,
                     )
                     break
-                wait = min(2 ** attempt * 2, 60)
-                logger.warning(
-                    "Server error %d on %s %s, retrying in %ds...",
-                    resp.status_code, method, url, wait,
-                )
-                time.sleep(wait)
+                self._pacer_increase(f"server error {resp.status_code}")
                 continue
 
             break
 
-        if not resp.ok:
+        assert resp is not None
+        if resp.ok:
+            self._pacer_decrease()
+        else:
             logger.error("API %s %s → %s: %s", method, url, resp.status_code, resp.text)
         resp.raise_for_status()
         return resp
@@ -142,27 +168,45 @@ class WorkDriveAPI:
     # ------------------------------------------------------------------
 
     def list_folder(self, folder_id: str) -> List[Dict[str, Any]]:
-        """List all items in a folder (paginated internally)."""
+        """List all items in a folder (cursor-paginated internally).
+
+        Zoho WorkDrive uses cursor-based pagination: each response includes
+        ``links.cursor.has_next`` and ``links.cursor.next`` with the URL for
+        the next page. page[offset] is not reliable past page 1.
+        """
         items: List[Dict[str, Any]] = []
-        page = 1
+        next_cursor = "0"
         while True:
             data = self._json("GET", f"{API_BASE}/files/{folder_id}/files", params={
-                "page[limit]": 50,
-                "page[offset]": (page - 1) * 50,
+                "page[limit]": PAGE_LIMIT,
+                "page[next]": next_cursor,
             })
             batch = data.get("data", [])
-            if not batch:
-                break
             items.extend(batch)
-            if len(batch) < 50:
+            cursor = data.get("links", {}).get("cursor", {})
+            if not cursor.get("has_next"):
                 break
-            page += 1
+            next_url = cursor.get("next", "")
+            parsed_next = parse_qs(urlparse(next_url).query).get("page[next]", [""])[0]
+            if not parsed_next:
+                logger.warning("list_folder: has_next=true but no page[next] in cursor; stopping")
+                break
+            next_cursor = parsed_next
         return items
 
     def get_file_meta(self, file_id: str) -> Dict[str, Any]:
         """Get metadata for a single file/folder."""
         data = self._json("GET", f"{API_BASE}/files/{file_id}")
         return data.get("data", data)
+
+    def get_file_meta_or_none(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """Like get_file_meta, but returns None when the file is gone (404)."""
+        try:
+            return self.get_file_meta(file_id)
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            raise
 
     def download_file(self, file_id: str, dest: Path) -> None:
         """Download a file to a local path."""
@@ -172,34 +216,52 @@ class WorkDriveAPI:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-    def upload_file(self, parent_id: str, local_path: Path, filename: Optional[str] = None) -> Dict[str, Any]:
-        """Upload a new file to a folder."""
+    def upload_file(self, parent_id: str, local_path: Path, override: bool = False,
+                    filename: Optional[str] = None) -> Dict[str, Any]:
+        """Upload a file to a folder.
+
+        Small files use the multipart /upload endpoint. Files >= 10 MiB use
+        /stream/upload with raw-body streaming (rclone's threshold). Setting
+        ``override=True`` replaces an existing file of the same name in
+        place (creates a new version); ``False`` creates a new file.
+        """
         name = filename or local_path.name
+        try:
+            size = local_path.stat().st_size
+        except OSError:
+            size = 0
+        if size >= LARGE_FILE_CUTOFF:
+            return self._stream_upload(parent_id, local_path, name, override, size)
+        return self._multipart_upload(parent_id, local_path, name, override)
+
+    def update_file(self, parent_id: str, local_path: Path) -> Dict[str, Any]:
+        """Upload a new version of an existing file. Back-compat shim."""
+        return self.upload_file(parent_id, local_path, override=True)
+
+    def _multipart_upload(self, parent_id: str, local_path: Path, name: str, override: bool) -> Dict[str, Any]:
         with open(local_path, "rb") as f:
             data = self._json("POST", f"{API_BASE}/upload", params={
                 "filename": name,
                 "parent_id": parent_id,
-                "override-name-exist": "false",
+                "override-name-exist": "true" if override else "false",
             }, files={
                 "content": (name, f, "application/octet-stream"),
             })
         return data.get("data", [{}])[0] if data.get("data") else data
 
-    def update_file(self, parent_id: str, local_path: Path) -> Dict[str, Any]:
-        """Upload a new version of an existing file.
-
-        Zoho's /upload endpoint matches by parent_id + filename; setting
-        override-name-exist=true replaces the existing file in place
-        (creating a new version) instead of creating a duplicate.
-        """
+    def _stream_upload(self, parent_id: str, local_path: Path, name: str, override: bool, size: int) -> Dict[str, Any]:
+        logger.info("stream-upload: %s (%d bytes)", name, size)
         with open(local_path, "rb") as f:
-            data = self._json("POST", f"{API_BASE}/upload", params={
-                "filename": local_path.name,
-                "parent_id": parent_id,
-                "override-name-exist": "true",
-            }, files={
-                "content": (local_path.name, f, "application/octet-stream"),
-            })
+            headers = {
+                "x-filename": quote(name),
+                "x-parent_id": parent_id,
+                "override-name-exist": "true" if override else "false",
+                "upload-id": str(uuid.uuid4()),
+                "x-streammode": "1",
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(size),
+            }
+            data = self._json("POST", f"{API_BASE}/stream/upload", data=f, headers=headers)
         return data.get("data", [{}])[0] if data.get("data") else data
 
     def create_folder(self, parent_id: str, name: str) -> Dict[str, Any]:
@@ -218,13 +280,18 @@ class WorkDriveAPI:
     # Helpers
     # ------------------------------------------------------------------
 
-    def walk_remote(self, folder_id: str, prefix: str = "") -> List[Dict[str, Any]]:
+    def walk_remote(self, folder_id: str, prefix: str = "", db=None, parent_id: str = "") -> List[Dict[str, Any]]:
         """Recursively list all files under a folder.
 
         Returns a flat list with an extra 'rel_path' key on each item.
+        If ``db`` is provided, folder paths are upserted into its folders
+        table so later uploads can resolve parent ids without relisting.
         """
+        logger.info("walk_remote: entering %s (id=%s)", prefix or "<root>", folder_id)
         result = []
-        for item in self.list_folder(folder_id):
+        items = self.list_folder(folder_id)
+        logger.info("walk_remote: %s has %d entries", prefix or "<root>", len(items))
+        for item in items:
             attrs = item.get("attributes", {})
             name = attrs.get("name", "")
             if name.startswith("."):
@@ -234,17 +301,35 @@ class WorkDriveAPI:
 
             item["rel_path"] = rel
             if is_folder:
-                result.extend(self.walk_remote(item["id"], rel))
+                logger.info("walk_remote: descend -> %s", rel)
+                if db is not None:
+                    db.upsert_folder(rel, item["id"], folder_id)
+                result.extend(self.walk_remote(item["id"], rel, db=db, parent_id=folder_id))
             else:
+                logger.debug("walk_remote: file -> %s", rel)
                 result.append(item)
         return result
 
-    def ensure_remote_dirs(self, folder_id: str, rel_path: str) -> str:
-        """Create intermediate directories and return the leaf folder ID."""
+    def ensure_remote_dirs(self, folder_id: str, rel_path: str, db=None) -> str:
+        """Create intermediate directories and return the leaf folder id.
+
+        With ``db`` provided, consults the folder cache first for each path
+        segment before falling back to a list_folder call. Newly resolved
+        or created folders are written back to the cache.
+        """
         parts = Path(rel_path).parent.parts
         current_id = folder_id
+        segment_rel = ""
         for part in parts:
-            # Check if subfolder already exists
+            segment_rel = f"{segment_rel}/{part}" if segment_rel else part
+
+            if db is not None:
+                cached = db.get_folder(segment_rel)
+                if cached and cached[1] == current_id:
+                    current_id = cached[0]
+                    continue
+
+            # Cache miss (or wrong parent): list and look for the child.
             children = self.list_folder(current_id)
             found = None
             for child in children:
@@ -253,8 +338,12 @@ class WorkDriveAPI:
                     found = child["id"]
                     break
             if found:
-                current_id = found
+                next_id = found
             else:
                 new_folder = self.create_folder(current_id, part)
-                current_id = new_folder.get("id", new_folder.get("data", {}).get("id", ""))
+                next_id = new_folder.get("id", new_folder.get("data", {}).get("id", ""))
+
+            if db is not None and next_id:
+                db.upsert_folder(segment_rel, next_id, current_id)
+            current_id = next_id
         return current_id
