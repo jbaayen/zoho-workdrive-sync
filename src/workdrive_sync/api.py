@@ -194,6 +194,15 @@ class WorkDriveAPI:
         data = self._json("GET", f"{API_BASE}/files/{file_id}")
         return data.get("data", data)
 
+    def get_file_meta_or_none(self, file_id: str) -> Optional[Dict[str, Any]]:
+        """Like get_file_meta, but returns None when the file is gone (404)."""
+        try:
+            return self.get_file_meta(file_id)
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            raise
+
     def download_file(self, file_id: str, dest: Path) -> None:
         """Download a file to a local path."""
         resp = self._request("GET", f"{API_BASE}/download/{file_id}", stream=True)
