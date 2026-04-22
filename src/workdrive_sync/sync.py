@@ -265,10 +265,7 @@ class SyncEngine:
         if item.action == Action.UPLOAD:
             logger.info(f"Uploading: {rel}")
             parent_id = self.api.ensure_remote_dirs(self.remote_folder_id, rel, db=self.db)
-            if item.remote_id:
-                result = self.api.update_file(parent_id, local)
-            else:
-                result = self.api.upload_file(parent_id, local)
+            result = self.api.upload_file(parent_id, local, override=bool(item.remote_id))
             # Upload response lacks etag/modified_time; fetch full metadata
             file_id = (result.get("id")
                        or result.get("attributes", {}).get("resource_id")

@@ -2,9 +2,10 @@
 
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 
@@ -17,6 +18,10 @@ API_BASE = "https://workdrive.zoho.eu/api/v1"
 # Cursor-paginated max page size for /files/{id}/files. rclone uses 1000
 # in production; higher values haven't been validated.
 PAGE_LIMIT = 1000
+
+# Files at or above this size use /stream/upload instead of the multipart
+# /upload endpoint — rclone's threshold.
+LARGE_FILE_CUTOFF = 10 * 1024 * 1024  # 10 MiB
 
 
 class WorkDriveAPI:
@@ -211,34 +216,52 @@ class WorkDriveAPI:
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-    def upload_file(self, parent_id: str, local_path: Path, filename: Optional[str] = None) -> Dict[str, Any]:
-        """Upload a new file to a folder."""
+    def upload_file(self, parent_id: str, local_path: Path, override: bool = False,
+                    filename: Optional[str] = None) -> Dict[str, Any]:
+        """Upload a file to a folder.
+
+        Small files use the multipart /upload endpoint. Files >= 10 MiB use
+        /stream/upload with raw-body streaming (rclone's threshold). Setting
+        ``override=True`` replaces an existing file of the same name in
+        place (creates a new version); ``False`` creates a new file.
+        """
         name = filename or local_path.name
+        try:
+            size = local_path.stat().st_size
+        except OSError:
+            size = 0
+        if size >= LARGE_FILE_CUTOFF:
+            return self._stream_upload(parent_id, local_path, name, override, size)
+        return self._multipart_upload(parent_id, local_path, name, override)
+
+    def update_file(self, parent_id: str, local_path: Path) -> Dict[str, Any]:
+        """Upload a new version of an existing file. Back-compat shim."""
+        return self.upload_file(parent_id, local_path, override=True)
+
+    def _multipart_upload(self, parent_id: str, local_path: Path, name: str, override: bool) -> Dict[str, Any]:
         with open(local_path, "rb") as f:
             data = self._json("POST", f"{API_BASE}/upload", params={
                 "filename": name,
                 "parent_id": parent_id,
-                "override-name-exist": "false",
+                "override-name-exist": "true" if override else "false",
             }, files={
                 "content": (name, f, "application/octet-stream"),
             })
         return data.get("data", [{}])[0] if data.get("data") else data
 
-    def update_file(self, parent_id: str, local_path: Path) -> Dict[str, Any]:
-        """Upload a new version of an existing file.
-
-        Zoho's /upload endpoint matches by parent_id + filename; setting
-        override-name-exist=true replaces the existing file in place
-        (creating a new version) instead of creating a duplicate.
-        """
+    def _stream_upload(self, parent_id: str, local_path: Path, name: str, override: bool, size: int) -> Dict[str, Any]:
+        logger.info("stream-upload: %s (%d bytes)", name, size)
         with open(local_path, "rb") as f:
-            data = self._json("POST", f"{API_BASE}/upload", params={
-                "filename": local_path.name,
-                "parent_id": parent_id,
-                "override-name-exist": "true",
-            }, files={
-                "content": (local_path.name, f, "application/octet-stream"),
-            })
+            headers = {
+                "x-filename": quote(name),
+                "x-parent_id": parent_id,
+                "override-name-exist": "true" if override else "false",
+                "upload-id": str(uuid.uuid4()),
+                "x-streammode": "1",
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(size),
+            }
+            data = self._json("POST", f"{API_BASE}/stream/upload", data=f, headers=headers)
         return data.get("data", [{}])[0] if data.get("data") else data
 
     def create_folder(self, parent_id: str, name: str) -> Dict[str, Any]:
