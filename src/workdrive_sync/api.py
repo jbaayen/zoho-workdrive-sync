@@ -4,6 +4,7 @@ import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -12,6 +13,10 @@ from .auth import ZohoAuth
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://workdrive.zoho.eu/api/v1"
+
+# Cursor-paginated max page size for /files/{id}/files. rclone uses 1000
+# in production; higher values haven't been validated.
+PAGE_LIMIT = 1000
 
 
 class WorkDriveAPI:
@@ -142,21 +147,30 @@ class WorkDriveAPI:
     # ------------------------------------------------------------------
 
     def list_folder(self, folder_id: str) -> List[Dict[str, Any]]:
-        """List all items in a folder (paginated internally)."""
+        """List all items in a folder (cursor-paginated internally).
+
+        Zoho WorkDrive uses cursor-based pagination: each response includes
+        ``links.cursor.has_next`` and ``links.cursor.next`` with the URL for
+        the next page. page[offset] is not reliable past page 1.
+        """
         items: List[Dict[str, Any]] = []
-        page = 1
+        next_cursor = "0"
         while True:
             data = self._json("GET", f"{API_BASE}/files/{folder_id}/files", params={
-                "page[limit]": 50,
-                "page[offset]": (page - 1) * 50,
+                "page[limit]": PAGE_LIMIT,
+                "page[next]": next_cursor,
             })
             batch = data.get("data", [])
-            if not batch:
-                break
             items.extend(batch)
-            if len(batch) < 50:
+            cursor = data.get("links", {}).get("cursor", {})
+            if not cursor.get("has_next"):
                 break
-            page += 1
+            next_url = cursor.get("next", "")
+            parsed_next = parse_qs(urlparse(next_url).query).get("page[next]", [""])[0]
+            if not parsed_next:
+                logger.warning("list_folder: has_next=true but no page[next] in cursor; stopping")
+                break
+            next_cursor = parsed_next
         return items
 
     def get_file_meta(self, file_id: str) -> Dict[str, Any]:
