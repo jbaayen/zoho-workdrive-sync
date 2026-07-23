@@ -3,9 +3,10 @@
 import hashlib
 import logging
 import sqlite3
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from .config import STATE_DB, ensure_config_dir
 
@@ -25,13 +26,14 @@ class FileRecord:
 
 
 class StateDB:
-    """Tracks per-file sync state in SQLite."""
+    """Tracks per-file and per-folder sync state in SQLite."""
 
     def __init__(self, path: Optional[Path] = None):
         ensure_config_dir()
         self.path = path or STATE_DB
         self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self._write_lock = threading.Lock()
         self._migrate()
 
     def _migrate(self) -> None:
@@ -43,6 +45,13 @@ class StateDB:
                 remote_etag     TEXT NOT NULL DEFAULT '',
                 remote_modified TEXT NOT NULL DEFAULT '',
                 remote_id       TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS folders (
+                rel_path  TEXT PRIMARY KEY,
+                remote_id TEXT NOT NULL,
+                parent_id TEXT NOT NULL DEFAULT ''
             )
         """)
         self.conn.commit()
@@ -61,20 +70,50 @@ class StateDB:
         return {r[0]: FileRecord(*r) for r in rows}
 
     def upsert(self, rec: FileRecord) -> None:
-        self.conn.execute(
-            "INSERT INTO files (rel_path, local_mtime, local_hash, remote_etag, remote_modified, remote_id) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(rel_path) DO UPDATE SET "
-            "local_mtime=excluded.local_mtime, local_hash=excluded.local_hash, "
-            "remote_etag=excluded.remote_etag, remote_modified=excluded.remote_modified, "
-            "remote_id=excluded.remote_id",
-            (rec.rel_path, rec.local_mtime, rec.local_hash, rec.remote_etag, rec.remote_modified, rec.remote_id)
-        )
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO files (rel_path, local_mtime, local_hash, remote_etag, remote_modified, remote_id) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "local_mtime=excluded.local_mtime, local_hash=excluded.local_hash, "
+                "remote_etag=excluded.remote_etag, remote_modified=excluded.remote_modified, "
+                "remote_id=excluded.remote_id",
+                (rec.rel_path, rec.local_mtime, rec.local_hash, rec.remote_etag, rec.remote_modified, rec.remote_id)
+            )
+            self.conn.commit()
 
     def remove(self, rel_path: str) -> None:
-        self.conn.execute("DELETE FROM files WHERE rel_path = ?", (rel_path,))
-        self.conn.commit()
+        with self._write_lock:
+            self.conn.execute("DELETE FROM files WHERE rel_path = ?", (rel_path,))
+            self.conn.commit()
+
+    def get_folder(self, rel_path: str) -> Optional[Tuple[str, str]]:
+        """Return (remote_id, parent_id) for a cached folder, or None."""
+        row = self.conn.execute(
+            "SELECT remote_id, parent_id FROM folders WHERE rel_path = ?", (rel_path,)
+        ).fetchone()
+        return (row[0], row[1]) if row else None
+
+    def all_folders(self) -> Dict[str, Tuple[str, str]]:
+        rows = self.conn.execute(
+            "SELECT rel_path, remote_id, parent_id FROM folders"
+        ).fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
+
+    def upsert_folder(self, rel_path: str, remote_id: str, parent_id: str = "") -> None:
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO folders (rel_path, remote_id, parent_id) VALUES (?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "remote_id=excluded.remote_id, parent_id=excluded.parent_id",
+                (rel_path, remote_id, parent_id),
+            )
+            self.conn.commit()
+
+    def remove_folder(self, rel_path: str) -> None:
+        with self._write_lock:
+            self.conn.execute("DELETE FROM folders WHERE rel_path = ?", (rel_path,))
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()

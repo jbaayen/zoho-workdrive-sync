@@ -17,7 +17,7 @@ from .config import Config, load_config, save_config
 from .conflicts import resolve_conflicts
 from .errors import show_errors
 from .state import StateDB
-from .sync import SyncEngine
+from .sync import Action, SyncEngine
 from .tray import SyncTray, TrayState
 
 logger = logging.getLogger(__name__)
@@ -152,6 +152,15 @@ class App:
         self._pending_conflicts = []
         self._errors: list[str] = []
         self._sync_lock = threading.Lock()
+        # Set while a full sync is in flight so a saved file isn't dropped;
+        # the full sync drains this with one fast-upload pass before exiting.
+        self._pending_fast_upload = False
+        # Watchdog ignores events until this wall-clock time. Bumped only
+        # after syncs that wrote local files (downloads or local deletes),
+        # so we don't bounce on our own writes. Upload-only / no-op syncs
+        # leave the watcher fully active so a save right after sync still
+        # reaches the fast-upload path.
+        self._suppress_watcher_until = 0.0
 
         self.tray = SyncTray(
             on_sync_now=self._trigger_sync,
@@ -186,6 +195,8 @@ class App:
             from watchdog.observers import Observer
             from watchdog.events import FileSystemEventHandler
 
+            app = self
+
             class Handler(FileSystemEventHandler):
                 def __init__(self, trigger):
                     self._trigger = trigger
@@ -199,11 +210,14 @@ class App:
                     self._timer.start()
 
                 def on_any_event(self, event):
-                    if not event.is_directory:
-                        self._debounce()
+                    if event.is_directory:
+                        return
+                    if time.time() < app._suppress_watcher_until:
+                        return
+                    self._debounce()
 
             self._observer = Observer()
-            self._observer.schedule(Handler(self._trigger_sync), self.cfg.local_folder, recursive=True)
+            self._observer.schedule(Handler(self._trigger_fast_upload), self.cfg.local_folder, recursive=True)
             self._observer.start()
             logger.info(f"Watching: {self.cfg.local_folder}")
         except ImportError:
@@ -218,8 +232,32 @@ class App:
             self._stop.wait(self.cfg.interval_seconds)
 
     def _trigger_sync(self) -> None:
-        """Trigger an immediate sync (from tray or watchdog)."""
+        """Trigger an immediate full sync (from tray "Sync Now")."""
         threading.Thread(target=self._do_sync, daemon=True).start()
+
+    def _trigger_fast_upload(self) -> None:
+        """Trigger a local-only fast-upload pass (from the watcher)."""
+        threading.Thread(target=self._do_fast_upload, daemon=True).start()
+
+    def _do_fast_upload(self) -> None:
+        if not self._sync_lock.acquire(blocking=False):
+            # A full sync is in flight; it will drain pending work when done.
+            self._pending_fast_upload = True
+            return
+        try:
+            start = time.time()
+            items = self.engine.scan_local_changes()
+            if not items:
+                return
+            self.tray.set_state(TrayState.SYNCING, f"Uploading {len(items)}...")
+            errors = self.engine.quick_upload(items)
+            logger.info("fast-upload: %d file(s) in %.1fs", len(items), time.time() - start)
+            if errors:
+                self._set_errors(errors)
+            elif not self._errors:
+                self.tray.set_state(TrayState.IDLE, "Synced")
+        finally:
+            self._sync_lock.release()
 
     def _do_sync(self) -> None:
         # Skip if another sync is already running. The watcher debounce can
@@ -230,8 +268,16 @@ class App:
             return
         try:
             self.tray.set_state(TrayState.SYNCING, "Syncing...")
+            wrote_local = False
             try:
                 actions, conflicts = self.engine.scan()
+
+                # Suppress the watcher only when this sync is about to
+                # touch the local filesystem -- otherwise a save right
+                # after an upload-only sync would be silently dropped.
+                wrote_local = any(
+                    a.action in (Action.DOWNLOAD, Action.LOCAL_DELETE) for a in actions
+                )
 
                 # Execute non-conflicting actions
                 errors = self.engine.execute(actions)
@@ -250,7 +296,23 @@ class App:
             except Exception as e:
                 logger.exception("Sync failed")
                 self._set_errors([str(e)])
+
+            # Drain any fast-upload requests that arrived while we were
+            # scanning, so a save made mid-sync still lands promptly.
+            if self._pending_fast_upload:
+                self._pending_fast_upload = False
+                try:
+                    pending_items = self.engine.scan_local_changes()
+                    if pending_items:
+                        logger.info("drain: %d pending fast-upload item(s)", len(pending_items))
+                        drain_errors = self.engine.quick_upload(pending_items)
+                        if drain_errors:
+                            self._set_errors(list(self._errors) + drain_errors)
+                except Exception:
+                    logger.exception("Pending fast-upload drain failed")
         finally:
+            if wrote_local:
+                self._suppress_watcher_until = time.time() + 3
             self._sync_lock.release()
 
     def _show_conflicts(self) -> None:
@@ -296,9 +358,36 @@ class App:
         Gtk.main()
 
 
+def reauthorize() -> None:
+    """Re-run the grant-code exchange, reusing the saved client credentials.
+
+    Needed when the required scope set changes: the refresh token carries the
+    scopes it was minted with, so an expanded SCOPES only takes effect after a
+    fresh grant. Overwrites the stored refresh token; leaves the rest of the
+    config (team, workspace, folder) untouched.
+    """
+    cfg = load_config()
+    if not cfg.client_id or not cfg.client_secret:
+        print("No saved credentials to re-authorize. Run setup first.")
+        sys.exit(1)
+
+    print("\n=== WorkDrive Sync - Re-authorize ===\n")
+    print(f"Generate a grant code at https://api-console.zoho.eu/")
+    print(f"  Self Client -> Generate Code")
+    print(f"  Scope: {SCOPES}\n")
+    grant_code = input("Grant code: ").strip()
+
+    ZohoAuth(cfg.client_id, cfg.client_secret).authorize(grant_code)
+    print("Re-authorized. Restart the sync client to pick up the new token.")
+
+
 def main() -> None:
     setup_logging()
     signal.signal(signal.SIGINT, signal.SIG_DFL)  # Allow Ctrl+C
+
+    if "--reauthorize" in sys.argv[1:]:
+        reauthorize()
+        return
 
     cfg = load_config()
     if not cfg.client_id:

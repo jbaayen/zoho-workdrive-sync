@@ -11,7 +11,11 @@ from .config import save_refresh_token, load_refresh_token
 logger = logging.getLogger(__name__)
 
 TOKEN_URL = "https://accounts.zoho.eu/oauth/v2/token"
-SCOPES = "WorkDrive.team.READ,WorkDrive.workspace.READ,WorkDrive.teamfolders.READ,WorkDrive.files.ALL"
+# ZohoFiles.files.ALL authorizes the dedicated upload host used for streaming
+# uploads (upload.zoho.eu); the WorkDrive.* scopes alone cover the main API
+# host but not that host, which rejects stream uploads with
+# 401 INVALID_OAUTHSCOPE. rclone's zoho backend requests the same scope set.
+SCOPES = "WorkDrive.team.READ,WorkDrive.workspace.READ,WorkDrive.teamfolders.READ,WorkDrive.files.ALL,ZohoFiles.files.ALL"
 
 
 class ZohoAuth:
