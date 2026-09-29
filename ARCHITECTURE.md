@@ -63,7 +63,7 @@ sequenceDiagram
 
 ## Delta Detection
 
-Each file is tracked with both local (mtime + SHA-256 hash) and remote (etag + modified_time) state. On each sync cycle:
+Each file is tracked with both local (mtime + SHA-256 hash) and remote (modified_time_in_millisecond) state. On each sync cycle:
 
 ```mermaid
 flowchart TD
@@ -76,7 +76,7 @@ flowchart TD
     HashCheck -->|Yes| LocalMod[local_modified]
     HashCheck -->|No| Unchanged
 
-    ScanRemote --> CompareRemote{etag or modified_time changed?}
+    ScanRemote --> CompareRemote{modified_time_in_millisecond changed?}
     CompareRemote -->|Yes| RemoteMod[remote_modified]
     CompareRemote -->|No| Unchanged2[remote unchanged]
 
@@ -111,7 +111,7 @@ User resolves each conflict via a batched GTK dialog with options:
 ~/.config/workdrive-sync/
     config.json      # client_id, client_secret, folder paths, team_id
     token.json       # OAuth refresh token (chmod 600)
-    state.db         # SQLite sync state (per-file hashes, etags)
+    state.db         # SQLite sync state (per-file hashes, remote timestamps)
 ```
 
 ## Threading Model

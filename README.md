@@ -60,7 +60,7 @@ The app starts in the system tray. Right-click for options:
 
 ## Sync Logic
 
-Two-way delta sync using a SQLite state database that tracks each file's local SHA-256 hash, mtime, remote etag, and remote modification time.
+Two-way delta sync using a SQLite state database that tracks each file's local SHA-256 hash and mtime, plus the remote modification time as epoch milliseconds.
 
 ### Triggers
 
@@ -71,7 +71,9 @@ Two-way delta sync using a SQLite state database that tracks each file's local S
 ### Change detection
 
 - **Local**: if the file's mtime changed, recompute the SHA-256 hash. Only mark as changed if the hash differs (avoids false positives from timestamp-only changes).
-- **Remote**: mark as changed if the etag or modification time differs from the stored values.
+- **Remote**: mark as changed if `modified_time_in_millisecond` differs from the stored value. (The API's
+  `modified_time` is a localized display string whose rendering moves with timezone, DST and year, so it
+  cannot be used as a change key; `resource_etag` is not returned at all.)
 
 ### Action matrix
 

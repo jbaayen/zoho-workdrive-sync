@@ -19,8 +19,11 @@ class FileRecord:
     rel_path: str
     local_mtime: float = 0.0
     local_hash: str = ""
-    remote_etag: str = ""
-    remote_modified: str = ""
+    # Remote modification time as epoch milliseconds. WorkDrive also exposes
+    # a "modified_time" string, but that is a localized display value whose
+    # rendering shifts with the session timezone, DST and the year, so it
+    # cannot be used as a change key.
+    remote_mtime_ms: int = 0
     remote_id: str = ""
 
 
@@ -34,41 +37,58 @@ class StateDB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._migrate()
 
-    def _migrate(self) -> None:
+    def _create_table(self) -> None:
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS files (
                 rel_path        TEXT PRIMARY KEY,
                 local_mtime     REAL NOT NULL DEFAULT 0,
                 local_hash      TEXT NOT NULL DEFAULT '',
-                remote_etag     TEXT NOT NULL DEFAULT '',
-                remote_modified TEXT NOT NULL DEFAULT '',
+                remote_mtime_ms INTEGER NOT NULL DEFAULT 0,
                 remote_id       TEXT NOT NULL DEFAULT ''
             )
         """)
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(files)")}
+        if cols and "remote_mtime_ms" not in cols:
+            # Old schema keyed remote state on resource_etag + modified_time.
+            # resource_etag is never returned by the API and modified_time is a
+            # display string, so neither baseline is worth keeping. Local
+            # baselines are preserved; remote_mtime_ms is backfilled by the
+            # next scan.
+            logger.info("Migrating sync state to epoch-based remote timestamps")
+            self.conn.execute("ALTER TABLE files RENAME TO files_old")
+            self._create_table()
+            self.conn.execute(
+                "INSERT INTO files (rel_path, local_mtime, local_hash, remote_mtime_ms, remote_id) "
+                "SELECT rel_path, local_mtime, local_hash, 0, remote_id FROM files_old"
+            )
+            self.conn.execute("DROP TABLE files_old")
+        else:
+            self._create_table()
         self.conn.commit()
 
     def get(self, rel_path: str) -> Optional[FileRecord]:
         row = self.conn.execute(
-            "SELECT rel_path, local_mtime, local_hash, remote_etag, remote_modified, remote_id "
+            "SELECT rel_path, local_mtime, local_hash, remote_mtime_ms, remote_id "
             "FROM files WHERE rel_path = ?", (rel_path,)
         ).fetchone()
         return FileRecord(*row) if row else None
 
     def all(self) -> Dict[str, FileRecord]:
         rows = self.conn.execute(
-            "SELECT rel_path, local_mtime, local_hash, remote_etag, remote_modified, remote_id FROM files"
+            "SELECT rel_path, local_mtime, local_hash, remote_mtime_ms, remote_id FROM files"
         ).fetchall()
         return {r[0]: FileRecord(*r) for r in rows}
 
     def upsert(self, rec: FileRecord) -> None:
         self.conn.execute(
-            "INSERT INTO files (rel_path, local_mtime, local_hash, remote_etag, remote_modified, remote_id) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO files (rel_path, local_mtime, local_hash, remote_mtime_ms, remote_id) "
+            "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(rel_path) DO UPDATE SET "
             "local_mtime=excluded.local_mtime, local_hash=excluded.local_hash, "
-            "remote_etag=excluded.remote_etag, remote_modified=excluded.remote_modified, "
-            "remote_id=excluded.remote_id",
-            (rec.rel_path, rec.local_mtime, rec.local_hash, rec.remote_etag, rec.remote_modified, rec.remote_id)
+            "remote_mtime_ms=excluded.remote_mtime_ms, remote_id=excluded.remote_id",
+            (rec.rel_path, rec.local_mtime, rec.local_hash, rec.remote_mtime_ms, rec.remote_id)
         )
         self.conn.commit()
 

@@ -21,6 +21,7 @@ class Action(Enum):
     REMOTE_DELETE = auto()
     CONFLICT = auto()
     REMOVE_STATE = auto()
+    REFRESH_STATE = auto()
 
 
 class ConflictType(Enum):
@@ -38,6 +39,21 @@ class Resolution(Enum):
     SKIP = "Skip"
 
 
+def _remote_mtime_ms(item: Dict) -> int:
+    """Remote modification time as epoch milliseconds.
+
+    WorkDrive's "modified_time" attribute is a localized display string
+    ("Apr 2, 2:40 pm"): it carries no year, and its rendering moves with the
+    session timezone and DST, so the same unmodified file yields different
+    strings on different days. "modified_time_in_millisecond" is the stable
+    absolute value. ("resource_etag" is not returned by this API at all.)
+    """
+    try:
+        return int(item.get("attributes", {}).get("modified_time_in_millisecond") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _is_hidden(rel_path: str) -> bool:
     """True if any path component starts with a dot."""
     return any(part.startswith(".") for part in Path(rel_path).parts)
@@ -52,8 +68,10 @@ class SyncItem:
     # Populated during scanning
     local_path: Path | None = None
     remote_id: str = ""
-    remote_etag: str = ""
-    remote_modified: str = ""
+    remote_mtime_ms: int = 0
+    # Refreshed local baseline, carried so REFRESH_STATE does not re-hash.
+    local_mtime: float = 0.0
+    local_hash: str = ""
 
 
 class SyncEngine:
@@ -105,6 +123,7 @@ class SyncEngine:
 
             local_changed = False
             remote_changed = False
+            stale_baseline = False
 
             # Determine local state
             if in_local and rec:
@@ -113,15 +132,26 @@ class SyncEngine:
                     h = file_hash(self.local_root / rel)
                     local_changed = h != rec.local_hash
                     local_files[rel] = (mtime, h)
+                    # Touched but identical (e.g. rewritten by another sync
+                    # client). Record the new mtime so the next scan does not
+                    # hash the file all over again.
+                    stale_baseline = not local_changed
             local_added = in_local and not rec
             local_deleted = not in_local and rec is not None
 
             # Determine remote state
+            r_ms = _remote_mtime_ms(remote_files[rel]) if in_remote else 0
             if in_remote and rec:
-                r_attrs = remote_files[rel].get("attributes", {})
-                r_etag = r_attrs.get("resource_etag", "")
-                r_mod = r_attrs.get("modified_time", "")
-                remote_changed = (r_etag != rec.remote_etag) or (r_mod != rec.remote_modified)
+                if rec.remote_mtime_ms:
+                    remote_changed = r_ms != rec.remote_mtime_ms
+                else:
+                    # No usable remote baseline: either a row written by an
+                    # older version, or a remote that reports no timestamp.
+                    # Treat the remote as changed only if it was touched after
+                    # we last wrote the local copy, and adopt it as the
+                    # baseline otherwise.
+                    remote_changed = r_ms > rec.local_mtime * 1000
+                    stale_baseline = stale_baseline or not remote_changed
 
             remote_added = in_remote and not rec
             remote_deleted = not in_remote and rec is not None and rec.remote_id
@@ -132,8 +162,9 @@ class SyncEngine:
                 action=Action.SKIP,
                 local_path=self.local_root / rel if in_local else None,
                 remote_id=remote_files[rel]["id"] if in_remote else (rec.remote_id if rec else ""),
-                remote_etag=remote_files[rel].get("attributes", {}).get("resource_etag", "") if in_remote else "",
-                remote_modified=remote_files[rel].get("attributes", {}).get("modified_time", "") if in_remote else "",
+                remote_mtime_ms=r_ms,
+                local_mtime=local_files[rel][0] if in_local else 0.0,
+                local_hash=(local_files[rel][1] or rec.local_hash) if in_local and rec else "",
             )
 
             # Classify action
@@ -163,6 +194,9 @@ class SyncEngine:
             elif local_deleted and remote_changed:
                 item.action = Action.CONFLICT
                 item.conflict_type = ConflictType.LOCAL_DEL_REMOTE_MOD
+            elif stale_baseline:
+                # Nothing to transfer, but the stored baseline is out of date.
+                item.action = Action.REFRESH_STATE
             # else: both unchanged -> SKIP
 
             if item.action == Action.CONFLICT:
@@ -200,13 +234,11 @@ class SyncEngine:
                        or result.get("attributes", {}).get("resource_id")
                        or item.remote_id)
             meta = self.api.get_file_meta(file_id)
-            attrs = meta.get("attributes", {})
             self.db.upsert(FileRecord(
                 rel_path=rel,
                 local_mtime=local.stat().st_mtime,
                 local_hash=file_hash(local),
-                remote_etag=attrs.get("resource_etag", ""),
-                remote_modified=attrs.get("modified_time", ""),
+                remote_mtime_ms=_remote_mtime_ms(meta),
                 remote_id=meta.get("id", file_id),
             ))
 
@@ -217,8 +249,7 @@ class SyncEngine:
                 rel_path=rel,
                 local_mtime=local.stat().st_mtime,
                 local_hash=file_hash(local),
-                remote_etag=item.remote_etag,
-                remote_modified=item.remote_modified,
+                remote_mtime_ms=item.remote_mtime_ms,
                 remote_id=item.remote_id,
             ))
 
@@ -244,6 +275,16 @@ class SyncEngine:
 
         elif item.action == Action.REMOVE_STATE:
             self.db.remove(rel)
+
+        elif item.action == Action.REFRESH_STATE:
+            logger.debug(f"Refreshing state: {rel}")
+            self.db.upsert(FileRecord(
+                rel_path=rel,
+                local_mtime=item.local_mtime,
+                local_hash=item.local_hash,
+                remote_mtime_ms=item.remote_mtime_ms,
+                remote_id=item.remote_id,
+            ))
 
         elif item.action == Action.CONFLICT:
             self._resolve_conflict(item)
@@ -290,8 +331,7 @@ class SyncEngine:
                 rel_path=item.rel_path,
                 local_mtime=local.stat().st_mtime if local.exists() else 0,
                 local_hash=file_hash(local) if local.exists() else "",
-                remote_etag=item.remote_etag,
-                remote_modified=item.remote_modified,
+                remote_mtime_ms=item.remote_mtime_ms,
                 remote_id=item.remote_id,
             ))
 
